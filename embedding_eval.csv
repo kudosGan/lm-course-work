@@ -1,0 +1,11 @@
+model,input_a,input_b,label,cosine
+mxbai-embed-large,Scrambled Eggs,Fried Eggs,similar,0.8571
+mxbai-embed-large,Grilled Cheese Sandwich,Quesadilla,similar,0.6298
+mxbai-embed-large,Spaghetti Carbonara,Stir-Fried Noodles,similar,0.5675
+mxbai-embed-large,Roast Chicken,Baked Lasagna,similar,0.5483
+mxbai-embed-large,Overnight Oats,Cold Brew Coffee,similar,0.5375
+mxbai-embed-large,Scrambled Eggs,Slow Cooker Beef Stew,dissimilar,0.5121
+mxbai-embed-large,Instant Ramen,Overnight Marinated Ribs,dissimilar,0.5558
+mxbai-embed-large,Toast with Avocado,Braised Pork Shoulder,dissimilar,0.4434
+mxbai-embed-large,Microwave Oatmeal,Pickled Vegetables,dissimilar,0.4362
+mxbai-embed-large,Pasta with Marinara,Sourdough Bread,dissimilar,0.5573

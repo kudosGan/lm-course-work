@@ -1,0 +1,71 @@
+{
+  "model": "mxbai-embed-large",
+  "pairs": [
+    {
+      "a": "Scrambled Eggs",
+      "b": "Fried Eggs",
+      "label": 1,
+      "cosine": 0.8571
+    },
+    {
+      "a": "Grilled Cheese Sandwich",
+      "b": "Quesadilla",
+      "label": 1,
+      "cosine": 0.6298
+    },
+    {
+      "a": "Spaghetti Carbonara",
+      "b": "Stir-Fried Noodles",
+      "label": 1,
+      "cosine": 0.5675
+    },
+    {
+      "a": "Roast Chicken",
+      "b": "Baked Lasagna",
+      "label": 1,
+      "cosine": 0.5483
+    },
+    {
+      "a": "Overnight Oats",
+      "b": "Cold Brew Coffee",
+      "label": 1,
+      "cosine": 0.5375
+    },
+    {
+      "a": "Scrambled Eggs",
+      "b": "Slow Cooker Beef Stew",
+      "label": 0,
+      "cosine": 0.5121
+    },
+    {
+      "a": "Instant Ramen",
+      "b": "Overnight Marinated Ribs",
+      "label": 0,
+      "cosine": 0.5558
+    },
+    {
+      "a": "Toast with Avocado",
+      "b": "Braised Pork Shoulder",
+      "label": 0,
+      "cosine": 0.4434
+    },
+    {
+      "a": "Microwave Oatmeal",
+      "b": "Pickled Vegetables",
+      "label": 0,
+      "cosine": 0.4362
+    },
+    {
+      "a": "Pasta with Marinara",
+      "b": "Sourdough Bread",
+      "label": 0,
+      "cosine": 0.5573
+    }
+  ],
+  "summary": {
+    "avg_similar": 0.628,
+    "avg_dissimilar": 0.501,
+    "separation": 0.127,
+    "accuracy_at_0_5": "7/10"
+  }
+}
