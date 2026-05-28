@@ -1,0 +1,87 @@
+# Week 1 Introduction to LLMs - Implementation Specs
+
+approach:
+  summary: >
+    Given a list of ingredients and a time limit, use gemma2:2b to generate a
+    beginner-friendly recipe with cooking steps, returned as structured JSON.
+  decisions:
+    llm_role:
+      choice: Enrichment/Creation
+      reasoning: >
+        The LLM generates a tailored recipe from scratch — it is not picking
+        from a fixed list, so classification doesn't apply. The output is
+        something new built from the student's specific inputs.
+    input_fields:
+      choice: ingredients + time_limit
+      reasoning: >
+        The student identified these as the two concrete constraints they face
+        when arriving home tired: what's in the kitchen and how long they have.
+    persona:
+      choice: A patient friend who knows cooking and keeps things simple
+      reasoning: >
+        The student is new to cooking and needs beginner-friendly steps. A
+        friendly, approachable persona avoids jargon and keeps instructions
+        clear.
+    output_format:
+      choice: JSON with fields recipe_name, ingredients, steps
+      reasoning: >
+        Structured output makes the result parseable and provides a foundation
+        to build on in later weeks. Student chose JSON over plain text.
+
+tasks:
+  task_1:
+    name: Write main.py with ollama.generate() call
+    details: |
+      Create main.py in the project root with the following structure:
+      - Hardcode example inputs: ingredients = "eggs, pasta, white wine"
+        and time_limit = "20 minutes" (student can change these to test)
+      - Build a prompt string that includes both inputs
+      - Call ollama.generate() with:
+          model="gemma2:2b"
+          prompt=<the constructed prompt>
+          system="You are a patient friend who knows how to cook. Give simple,
+                  beginner-friendly instructions. Never assume cooking knowledge."
+          format="json"
+      - Parse the JSON response with json.loads(result.response)
+      - Print the parsed result in a readable way
+      - Add a # TODO: try changing this prompt comment above the prompt string
+      Expected JSON output shape: { "recipe_name": "...", "ingredients": [...], "steps": [...] }
+
+  task_2:
+    name: Write problem_statement.md
+    details: |
+      Create problem_statement.md in the project root documenting:
+      - Problem Context: student lives alone, new to cooking, professional
+        with limited time, arrives home tired and hungry
+      - Problem Statement: given ingredients on hand and a time limit,
+        generate a beginner-friendly recipe with steps
+      - LLM Role: enrichment/creation
+      - Example input/output
+      - Success criteria
+
+integration_steps:
+  - This is a standalone main.py — no changes to src/baseline_recipe_classifier/ needed for Week 1
+  - Run with: uv run python main.py
+  - In later weeks the recipe generation logic may be incorporated into the classifier pipeline
+
+evaluation_plan:
+  metrics: [json_parses_without_error, steps_are_coherent, steps_are_beginner_appropriate]
+  dataset_size: 3-5 manual test cases with different ingredient combinations and time limits
+  baseline: Run with "eggs, pasta, white wine" + "20 minutes" as the reference input
+
+reference_materials:
+  notebook: notebooks/week1_introduction_to_llms.ipynb
+
+success_criteria:
+  minimum: main.py runs without errors and returns valid JSON with recipe_name, ingredients, and steps
+  good: Output steps are readable, beginner-friendly, and use only the provided ingredients
+
+verification:
+  cli:
+    - Run: uv run python main.py
+    - Confirm output prints without errors
+    - Confirm the JSON contains recipe_name, ingredients, and steps fields
+    - Try changing the ingredients or time_limit values and re-run to see different results
+  streamlit:
+    - Week 1 does not require a Streamlit app — verification is via CLI only
+    - If you want to explore further, you can print result.response before json.loads() to see the raw model output
