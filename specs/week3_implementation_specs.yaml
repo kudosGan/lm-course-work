@@ -1,0 +1,191 @@
+# Week 3 Transformer Architecture - Implementation Specs
+
+approach:
+  summary: >
+    Extend the recipe time classifier with a ChromaDB-backed semantic retrieval layer
+    that performs label-aware few-shot selection — retrieving the most similar example
+    per category (k=5) — so every prompt sees all five time labels before classifying.
+  decisions:
+    embedding_model:
+      choice: mxbai-embed-large (carried forward from Week 2)
+      reasoning: >
+        Validated in Week 2 with a separation gap of 0.127 (marginal but usable).
+        Reusing the same model avoids re-embedding the full dataset and keeps the
+        retrieval space consistent with the evaluation already done.
+
+    text_fields:
+      choice: name + key_ingredients concatenated as the embedded text
+      reasoning: >
+        Recipe name gives surface-level identity; key_ingredients adds the domain
+        signal most relevant to a tired beginner cook (what they actually have at home).
+        Full instructions are excluded — too long and waste context tokens.
+
+    chroma_metadata:
+      choice: >
+        Store label (A-E), name, key_ingredients, difficulty_level, mood_tag.
+        Store prep_time as a filter field only — never included in few-shot prompt text.
+      reasoning: >
+        label is required for few-shot prompting — without it the model has no signal
+        about the correct answer. name and key_ingredients aid debugging. difficulty_level
+        and mood_tag support beginner-friendly and comfort-food filtering. prep_time is
+        stored for pre-filtering ChromaDB results by the user's time constraint, but
+        hidden from the prompt to prevent the model from pattern-matching time to category
+        instead of reasoning from recipe characteristics (label leak prevention).
+
+    excluded_fields:
+      choice: Full instructions, nutritional info, image URLs
+      reasoning: >
+        Full instructions are too long and bloat context without helping time classification.
+        Nutritional info and image URLs are irrelevant to the use case of helping a tired
+        beginner decide what to cook tonight.
+
+    persistent_storage:
+      choice: ChromaDB PersistentClient saving to retrieval/chroma_db/
+      reasoning: >
+        Embedding all 13,057 recipes with mxbai-embed-large takes several minutes.
+        PersistentClient makes this a one-time cost — the vector store loads instantly
+        on every subsequent restart.
+
+    selection_strategy:
+      choice: Label-aware, k=5 — retrieve the most similar example for each of the 5 labels
+      reasoning: >
+        Pure similarity retrieval risks all k examples sharing the same label, creating
+        label bias where the model assumes everything belongs to that category. Retrieving
+        one example per label (A through E) ensures the model always sees the full decision
+        space and can reason about contrast, not just similarity.
+
+    context_budget:
+      choice: k=5, estimated 1375 tokens total (5 x 175 + 500 fixed)
+      reasoning: >
+        Gemma 2B has an 8,192-token context window. With 500 tokens reserved for system
+        prompt, query, and response buffer, 7,692 tokens remain. At ~175 tokens per
+        example, k=5 costs ~875 tokens — well within budget and leaves headroom for
+        longer recipe descriptions.
+
+tasks:
+  task_1:
+    name: Create retrieval/vector_store.py — ChromaDB wrapper
+    details: |
+      Create src/baseline_recipe_classifier/retrieval/__init__.py (empty).
+      Create src/baseline_recipe_classifier/retrieval/vector_store.py.
+
+      The module must expose two public functions:
+
+      add(records: list[dict]) -> None
+        - Each record has keys: text (str), label (str), name (str),
+          key_ingredients (str), difficulty_level (str), mood_tag (str), prep_time (int)
+        - Embed text using ollama.embed(model="mxbai-embed-large", input=text)
+        - Store in ChromaDB with:
+            ids: unique string IDs (e.g. str(index))
+            embeddings: the embedding vector
+            documents: text
+            metadatas: {label, name, key_ingredients, difficulty_level, mood_tag, prep_time}
+        - Skip records already in the collection (check existing IDs) to support
+          incremental indexing on restart.
+
+      query(text: str, k_per_label: int = 1, max_prep_time: int = None) -> list[dict]
+        - Embed text using ollama.embed(model="mxbai-embed-large", input=text)
+        - If max_prep_time is set, filter ChromaDB results:
+            where={"prep_time": {"$lte": max_prep_time}}
+        - For each label in [A, B, C, D, E]:
+            Query ChromaDB for the top-1 most similar document with that label:
+              where={"label": label}
+            Collect the result if found.
+        - Return list of dicts with keys: label, name, key_ingredients, difficulty_level,
+          mood_tag (do NOT include prep_time — label leak prevention).
+
+      Use PersistentClient with path="retrieval/chroma_db/" (relative to project root).
+      Collection name: "recipes".
+
+  task_2:
+    name: Build indexing script — index_recipes.py
+    details: |
+      Create scripts/index_recipes.py in the project root.
+
+      Steps:
+        1. Load data/All_Recipe_Web_Scraping_Dataset_Labeled.csv
+        2. For each row, build the embedded text:
+             text = f"{row['Name']}. Ingredients: {row['Ingredients']}"
+           Map CSV columns to record fields:
+             label        <- row['Label']  (A-E)
+             name         <- row['Name']
+             key_ingredients <- row['Ingredients'] (first 100 chars or pipe-delimited list)
+             difficulty_level <- row.get('Difficulty', 'unknown')
+             mood_tag     <- row.get('MoodTag', 'unknown')
+             prep_time    <- int(row.get('TotalTime', 0))
+        3. Call vector_store.add(records) in batches of 100.
+        4. Print progress every batch: "Indexed batch N/total"
+        5. Print final count on completion.
+
+      Run with: uv run python scripts/index_recipes.py
+
+  task_3:
+    name: Update main.py — retrieval-based few-shot classification
+    details: |
+      Update main.py (project root) to use the retrieval pipeline.
+
+      New flow:
+        1. Accept user query (ingredients + time limit from problem_statement.md format)
+        2. Build query text: f"{ingredients}. Time: {time_available}"
+        3. Call vector_store.query(query_text, k_per_label=1, max_prep_time=parsed_time)
+        4. Format retrieved examples into few-shot prompt block:
+             For each retrieved example:
+               "Recipe: {name}
+                Ingredients: {key_ingredients}
+                Difficulty: {difficulty_level}
+                Category: {label}"
+           Note: prep_time is NOT included in the formatted example.
+        5. Build full prompt with few-shot block + current query.
+        6. Call gemma2:2b via ollama.generate() and return predicted category.
+
+      Update app.py if present — pass time slider value as max_prep_time to query().
+
+integration_steps:
+  - Import vector_store from src/baseline_recipe_classifier/retrieval/vector_store.py
+  - Run scripts/index_recipes.py once before running the classifier — this populates retrieval/chroma_db/
+  - In main.py, replace the fixed few-shot examples with the result of vector_store.query()
+  - The retrieval/chroma_db/ directory is already in .gitignore — do not commit the index
+  - Confirm the collection count after indexing: collection.count() should match the CSV row count minus any skipped rows
+
+evaluation_plan:
+  metrics: [overall_accuracy, per_label_accuracy_A, per_label_accuracy_B,
+            per_label_accuracy_C, per_label_accuracy_D, per_label_accuracy_E]
+  dataset_size: 200 recipes from held-out 20% split
+  baseline: fixed few-shot — same 5 static hand-chosen examples for every query
+  confidence_threshold: >
+    >=5 percentage point improvement in overall accuracy AND per-label accuracy
+    improves for at least 3 of 5 categories, especially D and E (rare wait-time recipes
+    that fixed examples are likely to underrepresent).
+  doubt_threshold: >
+    <2 percentage point overall improvement (within noise on 200 samples),
+    or gains concentrated in a single category while others regress,
+    or results vary widely across different random test samples.
+
+reference_materials:
+  notebook: notebooks/week3_transformer_architecture.ipynb
+
+success_criteria:
+  minimum: >
+    scripts/index_recipes.py runs without errors and populates retrieval/chroma_db/.
+    vector_store.query() returns 5 examples (one per label) for a sample query.
+    main.py classifies a recipe using retrieved few-shot examples without error.
+  good: >
+    Retrieval-based few-shot achieves >=5pp accuracy improvement over fixed few-shot
+    on the 200-recipe test set, with per-label gains on at least D and E categories.
+
+verification:
+  cli:
+    - "Index the dataset first: uv run python scripts/index_recipes.py"
+    - "Confirm indexing completed — output should show total records indexed with no errors"
+    - "Run a sample query to verify retrieval: uv run python -c \"from baseline_recipe_classifier.retrieval.vector_store import query; results = query('eggs, pasta. Time: 20 minutes', k_per_label=1); [print(r) for r in results]\""
+    - "Confirm 5 results are returned, one per label A through E"
+    - "Confirm prep_time does NOT appear in any returned result dict"
+    - "Run the classifier end-to-end: uv run python main.py"
+    - "Confirm output shows a category prediction and the retrieved few-shot examples used"
+  streamlit:
+    - "Start the app: uv run streamlit run app.py"
+    - "Open http://localhost:8501 in your browser"
+    - "Enter ingredients and a time limit, then click Classify"
+    - "Confirm the app shows a predicted category (A-E)"
+    - "Enter 'eggs, pasta' with 20 minutes — confirm category A or B is returned"
+    - "Enter 'beef brisket' with 30 minutes — confirm the time pre-filter narrows results and the category reflects the constraint"

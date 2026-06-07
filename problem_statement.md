@@ -40,3 +40,10 @@ Enrichment/Creation — the LLM generates a tailored recipe from scratch based o
 - The JSON output contains `recipe_name`, `ingredients`, and `steps`
 - The steps are short, clear, and do not assume prior cooking knowledge
 - The recipe only uses the ingredients I provided
+
+## Edge Cases and Assumptions
+
+- Recipe names can be misleading about actual time commitment. A name that sounds simple does not guarantee a short total time.
+- Example: Instant Pot recipes advertise short cook times but include pressure build (15–20 min) and pressure release (10–15 min) on either side of the stated duration.
+- The classifier must not rely solely on surface-level recipe name semantics. "Instant Pot chicken" sounds fast; the total time is not.
+- Success requires distinguishing functional time cost — the full wall-clock time a tired person would spend — not just the topical category of the dish.

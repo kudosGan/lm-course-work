@@ -1,0 +1,141 @@
+# Week 2 Embeddings and Evaluation - Implementation Specs
+
+approach:
+  summary: >
+    Evaluate nomic-embed-text on domain-specific recipe pairs to validate embedding
+    quality for time-based classification, then build a minimal Streamlit app wrapping
+    the existing baseline_recipe_classifier package.
+  decisions:
+    embedding_pairs:
+      choice: >
+        6 pairs total — 3 similar (quick recipes), 2 dissimilar (quick vs. long),
+        1 edge case (Instant Pot: looks fast but is slow)
+      reasoning: >
+        Similar pairs share weeknight/minimal-prep semantic territory. Dissimilar pairs
+        are both "dinner" so won't get near-zero scores — the gap is what matters.
+        Edge case tests whether the model catches hidden time costs, not just surface names.
+
+    evaluation_thresholds:
+      choice: >
+        Gap < 0.10 = broken; 0.10–0.20 = marginal; 0.20–0.30 = usable; > 0.30 = strong.
+        Target: similar pairs 0.75–0.90, dissimilar pairs 0.45–0.65.
+      reasoning: >
+        The gap between similar and dissimilar scores is what a downstream classifier
+        or retrieval system actually uses — not absolute scores. A 0.04 gap is
+        meaningless even if individual scores look reasonable.
+
+    model_decision:
+      choice: >
+        Keep nomic-embed-text. Switch only if gap falls below 0.10. Fallback: filter
+        MTEB leaderboard by retrieval task category.
+      reasoning: >
+        A model topping STS benchmarks is not necessarily good at effort/time
+        distinctions, which is a functional axis not a topical one. If gap is marginal
+        (0.10–0.20) but not broken, try prepending explicit metadata first:
+        "quick, 15min: aglio e olio" vs "slow, 45min: instant pot beef stew".
+
+    streamlit_app_v1:
+      choice: Recipe name text input → category + reasoning output, calling existing package function
+      reasoning: >
+        Keeps LLM logic in one place. Week 2 version is intentionally minimal —
+        time slider, ingredient choices, and about-me profile are deferred to later weeks.
+
+    problem_statement_update:
+      choice: Add note that recipe names can be misleading about actual time commitment
+      reasoning: >
+        Instant Pot recipes expose the assumption that name alone signals time.
+        Pressure build and release add 20+ minutes beyond the stated cook time.
+        The classifier must account for hidden time costs.
+
+tasks:
+  task_1:
+    name: Create embedding evaluation script
+    details: |
+      Create scripts/eval_embeddings.py in the project root (not in notebooks/).
+      Define pairs as a list of dicts with keys: text_a, text_b, expected (similar/dissimilar).
+
+      Pairs to include:
+        Similar:
+          - Aglio e olio vs Fried rice
+          - Fried rice vs Shakshuka
+          - Aglio e olio vs Shakshuka
+        Dissimilar:
+          - Aglio e olio vs Beef bourguignon
+          - Shakshuka vs Whole roast chicken
+          - Fried rice vs Fresh croissants
+        Edge case:
+          - Aglio e olio vs Instant Pot beef stew (label as dissimilar)
+
+      For each pair:
+        1. Generate embeddings via ollama.embeddings(model="nomic-embed-text", prompt=text)
+        2. Compute cosine similarity using numpy
+        3. Print: pair | expected | score
+
+      After all pairs, print:
+        - Mean score for similar pairs
+        - Mean score for dissimilar pairs
+        - Gap between them
+        - Verdict based on threshold table
+
+  task_2:
+    name: Build Streamlit app v1
+    details: |
+      Create app.py in the project root.
+
+      Structure:
+        import streamlit as st
+        from baseline_recipe_classifier import classify  # or whatever the package's main function is called
+
+        st.title("Recipe Time Classifier")
+        recipe_input = st.text_input("Enter a recipe name:")
+        if st.button("Classify"):
+            with st.spinner("Classifying..."):
+                result = classify(recipe_input)  # call the existing package function
+            st.write("**Category:**", result["category"])
+            st.write("**Reasoning:**", result["reasoning"])
+
+      Do not replicate the LLM call in app.py — call the function from baseline_recipe_classifier.
+      Check __main__.py or __init__.py to find the correct function name and return shape.
+
+  task_3:
+    name: Update problem_statement.md
+    details: |
+      Add a new section to problem_statement.md titled "Edge Cases and Assumptions".
+      Include:
+        - Recipe names can be misleading about actual time commitment
+        - Example: Instant Pot recipes advertise short cook times but include
+          pressure build (15–20 min) and release (10–15 min) on either side
+        - The classifier must not rely solely on surface-level recipe name semantics
+        - Success requires distinguishing functional time cost, not just topical category
+
+integration_steps:
+  - Check baseline_recipe_classifier/__main__.py and __init__.py to find the classify function signature and its return value shape (category + reasoning)
+  - Import and call that function from app.py — do not duplicate the ollama call
+  - Run eval_embeddings.py before building the app to confirm nomic-embed-text gap meets the usable threshold (>= 0.20)
+  - If gap is 0.10–0.20, try prepending metadata to recipe names before embedding and re-run
+
+evaluation_plan:
+  metrics: [cosine_similarity_gap, mean_similar_score, mean_dissimilar_score]
+  dataset_size: 7 pairs (3 similar, 3 dissimilar, 1 edge case)
+  baseline: nomic-embed-text with raw recipe names (no metadata prepending)
+
+reference_materials:
+  notebook: notebooks/week2_tokenization_and_embedding.ipynb
+
+success_criteria:
+  minimum: Gap >= 0.10 (model is not broken for this domain) and Streamlit app runs and returns a category
+  good: Gap >= 0.20 (usable for downstream classification) and app shows both category and reasoning
+
+verification:
+  cli:
+    - Run the embedding eval script: uv run python scripts/eval_embeddings.py
+    - Confirm output shows mean similar score, mean dissimilar score, gap, and verdict
+    - Confirm gap is at least 0.10 (usable) — if below, try metadata prepending before proceeding
+    - Run the classifier directly to confirm the package function works: uv run python -m baseline_recipe_classifier "Aglio e olio"
+  streamlit:
+    - Start the app: uv run streamlit run app.py
+    - Open http://localhost:8501 in your browser
+    - Type "Aglio e olio" in the recipe name input and click Classify
+    - Confirm the app returns a category (e.g. Quick) and a reasoning explanation
+    - Type "Beef bourguignon" and confirm it returns a different category (e.g. Slow)
+    - Type "Instant Pot chicken" and note what category it returns — this is your edge case check

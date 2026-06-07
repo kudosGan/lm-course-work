@@ -18,10 +18,8 @@ retrieval/chroma_db/
 **/.DS_Store
 
 # Student-generated outputs
-specs/
 demo_checklist.md
 demo_script.md
-problem_statement.md
 
 # Fine-tuning artifacts
 finetuning/adapter/
