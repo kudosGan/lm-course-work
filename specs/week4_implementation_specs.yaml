@@ -1,0 +1,175 @@
+# Week 4 Prompt Tuning and Evaluation - Implementation Specs
+
+approach:
+  summary: >
+    Build and evaluate a few-shot classification prompt for A–E recipe time categories,
+    with wait_time as an explicit structured input field to fix A/D confusion, then
+    compare against a zero-shot baseline to make a data-driven decision about Week 5 adapters.
+  decisions:
+    task_type:
+      choice: Classification across five categories A–E
+      reasoning: >
+        A/B/C distinguish active cooking time (<=30min, 30-60min, >60min).
+        D/E add a wait-time dimension (D: short wait 1–30min, E: long wait >30min).
+        Fixed output set makes accuracy measurable and comparison clean.
+
+    prompt_structure:
+      choice: Three-role prompt — system (persona + category definitions), user (recipe + wait_time field), assistant (few-shot JSON examples)
+      reasoning: >
+        System role anchors the model to the classifier persona and all five category
+        boundaries up front. Assistant-role few-shot pairs teach the exact JSON output
+        format. User role carries the per-recipe input.
+
+    few_shot_examples:
+      choice: 5 examples, one per category (A through E)
+      reasoning: >
+        One example per category is the minimum for a balanced prior — without coverage
+        of all five the model assumes unseen categories don't exist. D/E contrast is
+        deliberately highlighted (Category A: scrambled eggs, Category E: overnight
+        marinated ribs) to fight the model's training prior that simple ingredients
+        imply quick total time.
+
+    output_control:
+      choice: Ollama format='json' + prompt-defined schema (category, reasoning, confidence)
+      reasoning: >
+        format='json' guarantees valid JSON structure. The prompt-defined schema steers
+        the model to populate specific fields. No Pydantic validation yet — identified
+        gap: category field is not constrained to Literal["A","B","C","D","E"], so
+        unexpected values like "B+" could slip through. Pydantic can be added later.
+
+    wait_time_field:
+      choice: Add wait_time as an explicit structured input field in the user role
+      reasoning: >
+        Root cause of A/D confusion: the model attends to ingredient simplicity as a
+        proxy for total time and ignores wait signals buried in the instructions text.
+        Surfacing wait_time as a named field makes the wait component impossible to
+        overlook and directly targets the failure mode.
+
+    eval_set_construction:
+      choice: 15 golden pairs (3 per category), with boundary cases, labels verified against wait_mins column
+      reasoning: >
+        Balanced across all five categories. Boundary cases (exactly 30-min recipe →
+        Category A by strict <=30 rule) test the model on the hardest decisions.
+        Labels verified against wait_mins column in CSV; implicit wait time detected
+        via keyword fallback (marinate overnight, refrigerate for, let rise, slow cooker).
+
+    escalation_decision:
+      choice: Refine prompt first; if D/E accuracy < 70% after refinement, proceed to LoRA adapters in Week 5
+      reasoning: >
+        Prompt engineering is the cheapest fix — one structured field change may be
+        enough. The 70% threshold on D/E is a concrete, measurable criterion so that
+        moving to adapters is a deliberate decision based on evidence, not frustration.
+        The eval set built this week becomes the training signal for the Week 5 adapter.
+
+tasks:
+  task_1:
+    name: Build few-shot prompt with wait_time field (prompt_v2)
+    details: |
+      In src/baseline_recipe_classifier/__main__.py, create a new function build_prompt_v2()
+      that constructs a three-role message list for ollama.chat():
+
+      - System message: classifier persona string + all five category definitions
+        (A: <=30min active no-wait, B: 30-60min active no-wait, C: >60min active no-wait,
+         D: any active time + wait 1-30min, E: any active time + wait >30min)
+
+      - Assistant/user few-shot pairs (5 total, one per category):
+        Each pair is a user turn with recipe name + ingredients + wait_time,
+        followed by an assistant turn with the JSON response.
+        Anchor examples: Category A = scrambled eggs, Category E = overnight marinated ribs.
+        Make D/E examples contrast explicitly on wait_time field.
+
+      - Final user message: the actual recipe to classify, with fields:
+          Recipe: <name>
+          Ingredients: <pipe-delimited list>
+          Wait time: <value from wait_mins column, or "none" if 0 or missing>
+
+      Output format (pass to Ollama as format='json'):
+        {"category": "A", "reasoning": "...", "confidence": "high|medium|low"}
+
+  task_2:
+    name: Update predict_category() to use prompt_v2 and extract wait_time
+    details: |
+      Modify predict_category() in __main__.py to:
+      1. Accept a wait_time parameter (int, minutes) alongside the existing inputs.
+      2. Call build_prompt_v2() instead of build_prompt() when prompt_v2 is selected.
+      3. Pass format='json' to ollama.chat() options.
+      4. Parse the JSON response and extract the 'category' field.
+      5. Fall back gracefully if 'category' key is missing — log a warning and return None.
+
+      Also update lookup_dish_context() to pull the wait_mins column from the CSV so
+      wait_time is available at call time.
+
+  task_3:
+    name: Build evaluation loop comparing prompt_v1 vs prompt_v2
+    details: |
+      Create or extend src/baseline_recipe_classifier/evaluate.py with a function
+      run_prompt_comparison() that:
+      1. Loads data/prompt_eval.csv (columns: recipe, label, skill).
+         Note: if wait_mins is not in prompt_eval.csv, derive it from
+         All_Recipe_Web_Scraping_Dataset_Labeled.csv by joining on recipe name.
+      2. Runs each recipe through prompt_v1 (zero-shot, no wait_time field) and
+         prompt_v2 (few-shot, with wait_time field).
+      3. Collects predicted vs. true labels for both prompt versions.
+      4. Computes: overall accuracy, per-category accuracy (A/B/C/D/E separately),
+         and prints a confusion matrix.
+      5. Flags the D/E accuracy explicitly — this is the decision threshold metric.
+
+      Print a comparison table at the end:
+        Prompt | Overall Acc | D Acc | E Acc
+        v1     | X%          | X%    | X%
+        v2     | X%          | X%    | X%
+
+      Decision output: if v2 D/E accuracy < 70%, print:
+        "RECOMMENDATION: Proceed to Week 5 LoRA adapters — D/E accuracy below threshold."
+      Otherwise print:
+        "RECOMMENDATION: Prompt v2 meets threshold — prompt engineering is sufficient."
+
+  task_4:
+    name: Wire evaluation into CLI entry point
+    details: |
+      Add a --prompt-version flag to the argument parser in __main__.py (values: v1, v2,
+      default: v2) so single-recipe classification uses the selected prompt.
+
+      Ensure `uv run python -m baseline_recipe_classifier.evaluate` still works and
+      now runs the comparison by default (or add --compare flag).
+
+integration_steps:
+  - build_prompt_v2() lives alongside build_prompt() in __main__.py — no new file needed
+  - lookup_dish_context() gains a wait_mins extraction from the existing CSV load
+  - predict_category() gains a wait_time parameter and a prompt_version switch
+  - evaluate.py gains run_prompt_comparison() — can be called from __main__ with --compare
+  - config.yaml does not need changes (model and dataset paths are already correct)
+  - data/prompt_eval.csv is read-only input; join against labeled CSV for wait_mins if needed
+
+evaluation_plan:
+  metrics:
+    - overall accuracy (prompt_v1 vs prompt_v2)
+    - per-category accuracy for all five categories
+    - confusion matrix (5x5)
+    - D/E accuracy specifically (decision threshold metric)
+  dataset_size: 15 golden pairs (3 per category)
+  baseline: prompt_v1 — zero-shot, no wait_time field, no few-shot examples
+  decision_threshold: 70% accuracy on categories D and E combined
+
+reference_materials:
+  notebook: notebooks/week4_prompt_tuning_and_evaluation.ipynb
+
+success_criteria:
+  minimum: >
+    prompt_v2 outperforms prompt_v1 on overall accuracy AND shows improvement on
+    D/E categories specifically. Eval loop runs without errors and prints comparison table.
+  good: >
+    D/E accuracy >= 70% on prompt_v2 — confirms prompt engineering is sufficient and
+    Week 5 adapters are optional rather than required.
+
+verification:
+  cli:
+    - "uv run python -m baseline_recipe_classifier 'Overnight Oats' — should return D or E, not A"
+    - "uv run python -m baseline_recipe_classifier 'Scrambled Eggs' — should return A"
+    - "uv run python -m baseline_recipe_classifier.evaluate — should print prompt_v1 vs prompt_v2 comparison table with D/E accuracy highlighted"
+    - "Check that the comparison table shows prompt_v2 D/E accuracy >= prompt_v1 D/E accuracy"
+  streamlit:
+    - "uv run streamlit run app.py"
+    - "Enter 'Overnight Oats' in the recipe input — result should show Category D or E with reasoning that mentions wait time"
+    - "Enter 'Scrambled Eggs' — result should show Category A"
+    - "Verify the reasoning field in the JSON output references wait_time explicitly for D/E predictions"

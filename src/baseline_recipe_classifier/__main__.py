@@ -8,6 +8,7 @@ Categories: A (Quick, No-Wait), B (Medium, No-Wait), C (Long, No-Wait),
 """
 
 import argparse
+import json
 import sys
 import re
 import yaml
@@ -78,10 +79,15 @@ def lookup_dish_context(dish_name, dataset):
         if 'Servings' in recipe and pd.notna(recipe['Servings']):
             context['servings'] = recipe['Servings']
 
-        # Ingredient count (split pipe-delimited list)
+        # Ingredient count and list (split pipe-delimited list)
         if 'Ingredients' in recipe and pd.notna(recipe['Ingredients']):
             ingredients_list = str(recipe['Ingredients']).split('|')
             context['ingredient_count'] = len(ingredients_list)
+            context['ingredients'] = ingredients_list
+
+        # Wait time in minutes
+        if 'wait_mins' in recipe and pd.notna(recipe['wait_mins']):
+            context['wait_mins'] = int(recipe['wait_mins'])
 
         # Description
         if 'Description' in recipe and pd.notna(recipe['Description']):
@@ -162,7 +168,92 @@ Category:"""
     return prompt
 
 
-def predict_category(dish_name, config, dataset=None, use_context=True):
+def build_prompt_v2(dish_name: str, ingredients: str, wait_time: int, categories: dict) -> list:
+    """
+    Build a few-shot classification prompt as a messages list for ollama.chat().
+
+    Uses one example per category (A–E) in the conversation history so the model
+    sees all five time boundaries, with explicit wait_time field to prevent the
+    A/D confusion caused by the model ignoring wait signals in free-text instructions.
+    """
+    cat_defs = "\n".join([
+        f"  {code}: {info['name']} — {info['description']}"
+        for code, info in categories.items()
+    ])
+
+    system_content = (
+        "You are a recipe time classifier. Given a recipe name, ingredients, and wait time, "
+        "classify it into one of five categories:\n"
+        f"{cat_defs}\n\n"
+        'Respond with JSON only: {"category": "A"|"B"|"C"|"D"|"E", '
+        '"reasoning": "brief explanation", "confidence": "high"|"medium"|"low"}'
+    )
+
+    # One few-shot example per category. D/E contrast is deliberate:
+    # D has a short but explicit wait; E has a long overnight wait.
+    few_shot = [
+        {"role": "user", "content": (
+            "Recipe: Scrambled Eggs\n"
+            "Ingredients: eggs | butter | salt | pepper\n"
+            "Wait time: none"
+        )},
+        {"role": "assistant", "content": json.dumps({
+            "category": "A",
+            "reasoning": "Very short prep and cook time with no wait needed.",
+            "confidence": "high"
+        })},
+        {"role": "user", "content": (
+            "Recipe: Chicken Stir Fry\n"
+            "Ingredients: chicken breast | soy sauce | garlic | bell pepper | oil\n"
+            "Wait time: none"
+        )},
+        {"role": "assistant", "content": json.dumps({
+            "category": "B",
+            "reasoning": "Moderate prep and cook time totalling under 60 minutes, no wait.",
+            "confidence": "high"
+        })},
+        {"role": "user", "content": (
+            "Recipe: Beef Bourguignon\n"
+            "Ingredients: beef chuck | red wine | bacon | mushrooms | carrots | onion\n"
+            "Wait time: none"
+        )},
+        {"role": "assistant", "content": json.dumps({
+            "category": "C",
+            "reasoning": "Long braise well over 60 minutes of active cooking, no wait.",
+            "confidence": "high"
+        })},
+        # D: short active time but explicit 10-min rest — looks 'quick' from ingredients alone
+        {"role": "user", "content": (
+            "Recipe: Spicy Tuna Rice Bowl\n"
+            "Ingredients: tuna | sushi rice | sriracha | sesame oil | green onion\n"
+            "Wait time: 10 minutes"
+        )},
+        {"role": "assistant", "content": json.dumps({
+            "category": "D",
+            "reasoning": "Short active cooking but requires a 10-minute rest for the rice before assembling.",
+            "confidence": "high"
+        })},
+        # E: simple ingredients but overnight marinating signals a very long wait
+        {"role": "user", "content": (
+            "Recipe: Overnight Marinated Grilled Chicken\n"
+            "Ingredients: chicken thighs | lemon juice | garlic | olive oil | oregano\n"
+            "Wait time: 480 minutes"
+        )},
+        {"role": "assistant", "content": json.dumps({
+            "category": "E",
+            "reasoning": "Requires overnight marinating — 480 minutes of wait time far exceeds the 30-minute threshold.",
+            "confidence": "high"
+        })},
+    ]
+
+    wait_display = f"{wait_time} minutes" if wait_time and wait_time > 0 else "none"
+    final_user = f"Recipe: {dish_name}\nIngredients: {ingredients}\nWait time: {wait_display}"
+
+    return [{"role": "system", "content": system_content}] + few_shot + [{"role": "user", "content": final_user}]
+
+
+def predict_category(dish_name, config, dataset=None, use_context=True,
+                     prompt_version='v1', wait_time=None):
     """
     Predict recipe time category using Ollama.
 
@@ -171,45 +262,80 @@ def predict_category(dish_name, config, dataset=None, use_context=True):
         config: Configuration dictionary
         dataset: Optional pandas DataFrame with recipe data
         use_context: Whether to use context if available (default: True)
+        prompt_version: 'v1' (zero-shot) or 'v2' (few-shot with wait_time field)
+        wait_time: Wait time in minutes for prompt_v2 (looked up from dataset if None)
 
     Returns:
         str: Predicted category code (A-E) or None if parsing fails
     """
-
-    # Try to get context if requested and dataset available
-    context_str = None
+    context = None
     if use_context and dataset is not None:
         context = lookup_dish_context(dish_name, dataset)
-        if context:
-            context_str = format_context(dish_name, context)
 
-    # Build prompt with or without context
+    if prompt_version == 'v2':
+        # Build ingredients string (up to 6 items for brevity)
+        ingredients_str = "not available"
+        if context and context.get('ingredients'):
+            ingredients_str = ' | '.join(
+                i.strip() for i in context['ingredients'][:6]
+            )
+
+        # Use provided wait_time, or fall back to dataset value
+        effective_wait = wait_time
+        if effective_wait is None:
+            effective_wait = context.get('wait_mins', 0) if context else 0
+
+        messages = build_prompt_v2(
+            dish_name, ingredients_str, effective_wait, config['categories']
+        )
+
+        try:
+            response = ollama.chat(
+                model=config['model']['name'],
+                messages=messages,
+                format='json',
+                options={'temperature': config['model']['temperature']}
+            )
+            response_text = response['message']['content'].strip()
+
+            parsed = json.loads(response_text)
+            category = str(parsed.get('category', '')).strip().upper()
+            if category in config['categories']:
+                return category
+            # Fallback: extract single letter if model returned something unexpected
+            match = re.search(r'\b([A-E])\b', category, re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+            print(f"Warning: unexpected category value: {category}", file=sys.stderr)
+            return None
+
+        except json.JSONDecodeError:
+            match = re.search(r'\b([A-E])\b', response_text, re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+            print(f"Warning: Could not parse JSON from response: {response_text}", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"Error calling Ollama: {e}", file=sys.stderr)
+            return None
+
+    # --- v1: original zero-shot prompt ---
+    context_str = format_context(dish_name, context) if context else None
     prompt = build_prompt(dish_name, config['categories'], context_str)
 
-    # Call Ollama
     try:
         response = ollama.chat(
             model=config['model']['name'],
-            messages=[{
-                'role': 'user',
-                'content': prompt
-            }],
-            options={
-                'temperature': config['model']['temperature']
-            }
+            messages=[{'role': 'user', 'content': prompt}],
+            options={'temperature': config['model']['temperature']}
         )
-
-        # Extract response text
         response_text = response['message']['content'].strip()
 
-        # Parse category (look for A, B, C, D, or E)
         match = re.search(r'\b([A-E])\b', response_text, re.IGNORECASE)
-
         if match:
             return match.group(1).upper()
-        else:
-            print(f"Warning: Could not parse category from response: {response_text}", file=sys.stderr)
-            return None
+        print(f"Warning: Could not parse category from response: {response_text}", file=sys.stderr)
+        return None
 
     except Exception as e:
         print(f"Error calling Ollama: {e}", file=sys.stderr)
@@ -241,6 +367,13 @@ def main():
         type=str,
         default=None,
         help="Path to recipe dataset CSV (overrides config)"
+    )
+    parser.add_argument(
+        "--prompt-version",
+        type=str,
+        default="v2",
+        choices=["v1", "v2"],
+        help="Prompt version: v1 (zero-shot) or v2 (few-shot with wait_time field, default)"
     )
 
     args = parser.parse_args()
@@ -281,13 +414,15 @@ def main():
     print(f"Using model: {config['model']['name']}")
     mode = "baseline" if args.no_context or dataset is None else "context-enhanced"
     print(f"Mode: {mode}")
+    print(f"Prompt version: {args.prompt_version}")
     print()
 
     category = predict_category(
         args.dish_name,
         config,
         dataset=dataset,
-        use_context=not args.no_context
+        use_context=not args.no_context,
+        prompt_version=args.prompt_version
     )
 
     if category:
