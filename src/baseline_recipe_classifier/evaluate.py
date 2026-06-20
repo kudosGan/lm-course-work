@@ -66,7 +66,7 @@ def print_results(mode, accuracy, correct, total, predictions, verbose=False):
     if verbose:
         print(f"\nDetailed Results:")
         for pred in predictions:
-            status = "✓" if pred['correct'] else "✗"
+            status = "OK" if pred['correct'] else "XX"
             print(f"  {status} {pred['dish'][:40]:40} | GT: {pred['ground_truth']} | Pred: {pred['predicted']}")
 
 
