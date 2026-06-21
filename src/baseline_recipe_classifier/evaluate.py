@@ -152,7 +152,7 @@ def run_prompt_comparison(config, labeled_csv_path, eval_csv_path, dataset):
         n = len(v1_rows)
         v1_acc = v1_c / n * 100
         v2_acc = v2_c / n * 100
-        marker = " ← threshold" if cat in ('D', 'E') else ""
+        marker = " <- threshold" if cat in ('D', 'E') else ""
         print(f"  {cat:<10}  {v1_acc:>6.0f}%  {v2_acc:>6.0f}%  {v1_c:>3}/{n}      {v2_c:>3}/{n}{marker}")
         if cat in ('D', 'E'):
             de_v1_correct += v1_c; de_v1_total += n
@@ -275,7 +275,7 @@ def run_adapter_comparison(config, labeled_csv_path, eval_csv_path, dataset):
         bc = sum(1 for r in base_rows if r['correct'])
         ac = sum(1 for r in adpt_rows if r['correct'])
         n = len(base_rows)
-        marker = " <- threshold" if cat in ('D', 'E') else ""
+        marker = " <- threshold" if cat in ("D", "E") else ""
         print(f"  {cat:<12}  {bc/n*100:>5.0f}%  {ac/n*100:>7.0f}%  {bc:>3}/{n}      {ac:>3}/{n}{marker}")
         if cat in ('D', 'E'):
             de_base_c += bc; de_base_t += n
