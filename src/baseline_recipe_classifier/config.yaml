@@ -7,6 +7,8 @@ model:
 dataset:
   path: "data/All_Recipe_Web_Scraping_Dataset_Labeled.csv"  # Path to recipe dataset (relative to project root)
 
+adapter_path: "adapters/recipe_d_e"
+
 categories:
   A:
     name: "Quick, No-Wait"

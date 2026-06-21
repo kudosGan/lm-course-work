@@ -168,6 +168,98 @@ Category:"""
     return prompt
 
 
+# Inference prompt for the LoRA adapter.
+# Must match the instruction format in scripts/generate_finetune_data.py exactly.
+ADAPTER_INSTRUCTION_TEMPLATE = (
+    "Classify this recipe by cooking time category.\n"
+    "A: Quick No-Wait — total time ≤30 min, no wait time\n"
+    "B: Medium No-Wait — 30–60 min total, no wait time\n"
+    "C: Long No-Wait — total time >60 min, no wait time\n"
+    "D: Short Wait — any active time + wait 1–30 min\n"
+    "E: Long Wait — any active time + wait >30 min\n\n"
+    "Recipe: {name}\n"
+    "Wait time: {wait_mins} minutes"
+)
+
+_adapter_cache: dict = {}  # {adapter_path: (model, tokenizer)}
+
+
+def predict_with_adapter(dish_name, config, wait_mins=0, adapter_path=None):
+    """
+    Classify a recipe using a locally loaded LoRA adapter.
+
+    Returns category string (A-E), or None if adapter is unavailable or inference fails.
+    Raw model.generate() does not enforce JSON format — JSON is extracted via regex.
+    """
+    if adapter_path is None:
+        package_dir = os.path.dirname(__file__)
+        project_root = os.path.dirname(os.path.dirname(package_dir))
+        adapter_path = os.path.join(project_root, "adapters", "recipe_d_e")
+
+    if not os.path.exists(os.path.join(adapter_path, "adapter_config.json")):
+        return None
+
+    if adapter_path not in _adapter_cache:
+        try:
+            from peft import PeftModel
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            import torch
+
+            print(f"Loading adapter from {adapter_path}...", file=sys.stderr)
+            tokenizer = AutoTokenizer.from_pretrained(adapter_path)
+            base = AutoModelForCausalLM.from_pretrained(
+                "google/gemma-2-2b",
+                torch_dtype=torch.float16,
+                device_map="auto",
+            )
+            model = PeftModel.from_pretrained(base, adapter_path)
+            model.eval()
+            _adapter_cache[adapter_path] = (model, tokenizer)
+        except Exception as e:
+            print(f"Warning: Failed to load adapter: {e}", file=sys.stderr)
+            return None
+
+    model, tokenizer = _adapter_cache[adapter_path]
+
+    # Prompt ends with "Response: " to prime generation — matches training format
+    instruction = ADAPTER_INSTRUCTION_TEMPLATE.format(
+        name=dish_name,
+        wait_mins=wait_mins if wait_mins and wait_mins > 0 else 0,
+    )
+    prompt = instruction + "\n\nResponse: "
+
+    try:
+        import torch
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            output = model.generate(
+                **inputs,
+                max_new_tokens=128,
+                do_sample=False,
+            )
+        raw_text = tokenizer.decode(
+            output[0][inputs["input_ids"].shape[1]:],
+            skip_special_tokens=True,
+        )
+
+        # Raw generation does not guarantee valid JSON — extract explicitly
+        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        if not match:
+            print(f"Warning: No JSON in adapter output: {raw_text!r}", file=sys.stderr)
+            return None
+
+        parsed = json.loads(match.group())
+        category = str(parsed.get("category", "")).strip().upper()
+        if category in config["categories"]:
+            return category
+        letter = re.search(r'\b([A-E])\b', category)
+        return letter.group(1).upper() if letter else None
+
+    except Exception as e:
+        print(f"Warning: Adapter inference failed: {e}", file=sys.stderr)
+        return None
+
+
 def build_prompt_v2(dish_name: str, ingredients: str, wait_time: int, categories: dict) -> list:
     """
     Build a few-shot classification prompt as a messages list for ollama.chat().

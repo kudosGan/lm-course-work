@@ -1,0 +1,269 @@
+# Week 5 Fine-Tuning with Adapters - Implementation Specs
+
+approach:
+  summary: >
+    Train a LoRA adapter on Gemma2:2b using 70 generated D/E examples to fix 0% D/E
+    accuracy, using a teacher model to produce labelled training data from real recipes
+    filtered by wait_mins > 0, then evaluate the adapter against the Week 4 15-pair
+    benchmark and expose a base-vs-adapter toggle in the Streamlit app.
+  decisions:
+    finetuning_goal:
+      choice: Option B — accuracy gap on D/E categories
+      reasoning: >
+        Week 4 prompt_v2 achieved 0% accuracy on categories D and E. The model
+        ignores the wait_time signal when active prep time is short, predicting A
+        instead of D/E. This is a targeted, measurable failure slice that fine-tuning
+        is better positioned to fix than further prompt engineering.
+
+    label_source:
+      choice: Two-tier — real recipes filtered by wait_mins > 0 (Tier 1) plus teacher model reasoning (Tier 2)
+      reasoning: >
+        Tier 1 uses the wait_mins column from the 13,057-row dataset as ground truth
+        labels — already trusted and programmatically verifiable. Tier 2 uses the
+        strongest available Ollama model (e.g. gemma4) to generate natural language
+        reasoning explaining why each recipe is D or E. Teacher model verified upfront
+        with an 8/10 gate on 10 recipes with known labels before bulk generation.
+
+    dataset_coverage:
+      choice: 70 examples, 35D/35E, oversampling hard boundary cases
+      reasoning: >
+        Hard boundary cases — short active time, long wait time (overnight oats,
+        marinated dishes) — are the exact pattern causing 0% D/E accuracy. A dataset
+        of only obvious examples like 8-hour slow cooker stews would teach the model
+        the easy surface pattern while leaving the hard cases unsolved. Deliberate
+        oversampling of the failure slice is required.
+
+    label_validation:
+      choice: Random 10-sample manual check (8/10 threshold) plus automated cross-check of all labels against wait_mins
+      reasoning: >
+        The random sample catches systematic teacher model errors before committing
+        to the full batch. The automated cross-check is a programmatic sanity layer —
+        any generated label that contradicts the wait_mins column is flagged for manual
+        review. If fewer than 8/10 pass manual check, refine the teacher prompt and
+        regenerate rather than proceeding to training with bad labels.
+
+    data_generation_caching:
+      choice: Cache-first — check for data/finetune_d_e_examples.jsonl before calling teacher model
+      reasoning: >
+        Regenerating 70 examples on every run wastes time and is non-deterministic.
+        Writing to JSONL on first run and loading from disk on subsequent runs ensures
+        reproducibility and lets training be re-run without re-generating.
+
+    training_platform:
+      choice: Google Colab T4 GPU with Unsloth and SFTTrainer
+      reasoning: >
+        Windows machine without a suitable local GPU for fine-tuning. Colab T4 matches
+        exactly what the Week 5 notebook is designed for. Unsloth provides optimised
+        LoRA training for Gemma2:2b within Colab memory limits.
+
+    adapter_transfer:
+      choice: Save adapter to Google Drive under adapters/recipe_d_e, manually download, commit to repo
+      reasoning: >
+        Drive mount in Colab saves the adapter directly without manual copy during
+        training. Manual download via Drive web interface is needed because Drive desktop
+        sync is not installed. Committing the adapter (~10MB) directly to GitHub keeps
+        it versioned alongside the code without requiring git-lfs.
+
+    prompt_format_consistency:
+      choice: Adapter inference uses the exact same prompt format as training — no few-shot if not used during training
+      reasoning: >
+        Training and inference format must match exactly. The adapter path will likely
+        use a simpler prompt without ChromaDB few-shot examples if that is what the
+        adapter was trained on. Mismatching formats causes unpredictable adapter behaviour
+        because the model never saw the inference format during training.
+
+    streamlit_toggle:
+      choice: Radio button — Base model (prompt_v2 + ChromaDB few-shot) vs With LoRA adapter (simpler prompt)
+      reasoning: >
+        The toggle makes the before/after comparison interactive and visible. The most
+        informative test case is Overnight Oats (5 min active, 480 min wait) — the base
+        model is expected to predict A while the adapter should predict D. This is the
+        clearest possible demonstration of whether the adapter learned to weight wait_time
+        correctly.
+
+tasks:
+  task_1:
+    name: Generate D/E fine-tuning dataset with teacher model
+    details: |
+      Create scripts/generate_finetune_data.py (or a notebook cell block):
+
+      1. Cache check: if data/finetune_d_e_examples.jsonl exists, load and return — skip generation.
+
+      2. Filter source dataset: load All_Recipe_Web_Scraping_Dataset_With_Directions.csv,
+         keep only rows where wait_mins > 0. This gives ground truth D/E labels.
+         Assign label D if wait_mins is between 1 and 30, label E if wait_mins > 30.
+
+      3. Verify teacher model upfront:
+         - Sample 10 recipes with known D/E labels from the filtered set.
+         - Call teacher model (strongest available via Ollama, e.g. gemma4) with a prompt
+           asking it to classify the recipe as D or E and explain its reasoning.
+         - Manually review: if fewer than 8/10 labels match wait_mins ground truth,
+           stop and refine the teacher prompt before proceeding.
+
+      4. Stratified sampling:
+         - Target 35 D examples and 35 E examples, total 70.
+         - Deliberately include boundary cases: recipes with active_time <= 15 mins but
+           wait_mins > 30 (overnight oats, marinated dishes, yeasted doughs, Instant Pot).
+         - Do not include only obvious cases like 8-hour slow cooker stews.
+
+      5. For each sampled recipe, call the teacher model with a prompt like:
+           "This recipe is called {name}. Active cooking time: {active_mins} minutes.
+            Wait time: {wait_mins} minutes. Classify it as D (wait 1-30 min) or E
+            (wait > 30 min) and explain in one sentence why the wait time determines
+            the category."
+         Save the teacher's output as the reasoning field.
+
+      6. Automated validation: for every generated example, cross-check the generated
+         label against the wait_mins column. Flag any mismatch for manual review.
+
+      7. Random batch validation: sample 10 from the full 70, manually verify that:
+         - Label matches wait_mins ground truth
+         - Reasoning text cites the actual wait_time value, not generic explanations
+         If fewer than 8/10 pass, refine teacher prompt and regenerate.
+
+      8. Save to data/finetune_d_e_examples.jsonl in Unsloth SFTTrainer format:
+         {"instruction": "<prompt text>", "output": "<label and reasoning>"}
+
+  task_2:
+    name: Format dataset and train LoRA adapter on Colab
+    details: |
+      Open notebooks/week5_fine_tuning_with_adapters.ipynb in Google Colab (T4 GPU runtime).
+
+      1. Mount Google Drive:
+           from google.colab import drive
+           drive.mount('/content/drive')
+
+      2. Upload data/finetune_d_e_examples.jsonl to Colab (or load from Drive).
+
+      3. Load base model with Unsloth:
+           from unsloth import FastLanguageModel
+           model, tokenizer = FastLanguageModel.from_pretrained(
+               model_name="unsloth/gemma-2-2b-bnb-4bit",
+               max_seq_length=2048,
+               load_in_4bit=True,
+           )
+
+      4. Attach LoRA:
+           model = FastLanguageModel.get_peft_model(
+               model,
+               r=16,
+               lora_alpha=32,
+               target_modules=["q_proj", "v_proj"],
+               lora_dropout=0,
+               bias="none",
+           )
+
+      5. Format training data: ensure each example uses the exact same prompt format
+         that will be used at inference time in the Streamlit adapter path.
+         If few-shot examples are NOT included in training format, do NOT include
+         them at inference time either.
+
+      6. Run SFTTrainer with dataset, save adapter to Drive:
+           trainer.train()
+           model.save_pretrained("/content/drive/MyDrive/adapters/recipe_d_e")
+           tokenizer.save_pretrained("/content/drive/MyDrive/adapters/recipe_d_e")
+
+      7. Download adapter folder from Google Drive web interface.
+         Copy into local repo under adapters/recipe_d_e/.
+         Commit to GitHub: git add adapters/recipe_d_e && git commit -m "Add Week 5 LoRA adapter"
+
+  task_3:
+    name: Add adapter inference path to classifier
+    details: |
+      In src/baseline_recipe_classifier/__main__.py, add a function predict_with_adapter():
+
+      1. Load the adapter from adapters/recipe_d_e/ using transformers + peft:
+           from peft import PeftModel
+           from transformers import AutoModelForCausalLM, AutoTokenizer
+           base = AutoModelForCausalLM.from_pretrained("google/gemma-2-2b")
+           model = PeftModel.from_pretrained(base, "adapters/recipe_d_e")
+           tokenizer = AutoTokenizer.from_pretrained("adapters/recipe_d_e")
+
+      2. Build the inference prompt using the EXACT same format used in training
+         (no few-shot examples if they were not in the training format).
+
+      3. Run model.generate() and extract the JSON result:
+           output = model.generate(...)
+           raw_text = tokenizer.decode(output[0], skip_special_tokens=True)
+           # Raw generation does NOT guarantee valid JSON — extract it explicitly:
+           import re, json
+           match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+           result = json.loads(match.group()) if match else None
+
+      4. Return the category field from the parsed result, with fallback if parsing fails.
+
+      Keep predict_category() (Ollama base model path) unchanged — the adapter path is
+      additive, not a replacement.
+
+  task_4:
+    name: Add before/after evaluation and adapter toggle to Streamlit app
+    details: |
+      1. Evaluation (run after adapter is committed to repo):
+         In evaluate.py or a new script, add run_adapter_comparison():
+         - Load data/prompt_eval.csv (15-pair eval set from Week 4).
+         - Run each recipe through predict_category() with prompt_v2 (base model baseline).
+         - Run each recipe through predict_with_adapter() (LoRA adapter).
+         - Compute overall accuracy and D/E accuracy for both.
+         - Print comparison table:
+             Mode          | Overall Acc | D Acc | E Acc
+             Base (v2)     | X%          | X%    | X%
+             LoRA adapter  | X%          | X%    | X%
+         - If adapter D/E accuracy >= 70%: print "GOAL MET — adapter fixes D/E failure slice."
+         - Otherwise: print "Below threshold — consider more boundary case examples or adjust LoRA rank."
+
+      2. Streamlit toggle in app.py:
+         - Add a radio button at the top of the classifier section:
+             mode = st.radio("Inference mode", ["Base model", "With LoRA adapter"])
+         - If "Base model": call predict_category() with prompt_v2 + ChromaDB few-shot (existing path).
+         - If "With LoRA adapter": call predict_with_adapter() with the simpler training-matched prompt.
+         - Display result from whichever mode is selected.
+         - If adapter files are not yet present (adapters/recipe_d_e/ does not exist):
+             show st.info("Adapter not yet available — train and commit it first. Running base model.")
+             and fall back to base model silently.
+
+integration_steps:
+  - data/finetune_d_e_examples.jsonl is generated locally or in Colab, committed as read-only input
+  - adapters/recipe_d_e/ is committed to repo root after Colab training and manual download
+  - predict_with_adapter() is added to __main__.py alongside existing predict_category() — no replacement
+  - evaluate.py gains run_adapter_comparison() callable via --adapter-compare CLI flag
+  - app.py gains a radio toggle that switches between the two inference paths
+  - config.yaml gains adapter_path entry pointing to adapters/recipe_d_e
+
+evaluation_plan:
+  metrics:
+    - overall accuracy (base model prompt_v2 vs LoRA adapter)
+    - D/E accuracy specifically (primary decision threshold metric)
+    - canary test — Overnight Oats predicted as D by adapter, A by base model
+  dataset_size: 15 golden pairs from prompt_eval.csv (same as Week 4 benchmark)
+  baseline: Week 4 prompt_v2 — 0% D/E accuracy, overall 40% accuracy
+  decision_threshold: 70% accuracy on categories D and E combined
+
+reference_materials:
+  notebook: notebooks/week5_fine_tuning_with_adapters.ipynb
+
+success_criteria:
+  minimum: >
+    Adapter trained and committed. Streamlit toggle switches between base model and
+    adapter without crashing. Overnight Oats returns D from adapter path and A from
+    base model path.
+  good: >
+    Adapter achieves >= 70% D/E accuracy on the 15-pair eval set, confirmed by
+    run_adapter_comparison(). Comparison table printed with before/after numbers.
+
+verification:
+  cli:
+    - "Ensure adapter exists: ls adapters/recipe_d_e/ — should contain adapter_config.json and model weights"
+    - "uv run python -m baseline_recipe_classifier.evaluate --adapter-compare — should print before/after table with D/E accuracy for both modes"
+    - "Check that adapter D/E accuracy >= 70% in the printed table"
+    - "uv run python -c \"from baseline_recipe_classifier.__main__ import predict_with_adapter; print(predict_with_adapter('Overnight Oats'))\" — should return D"
+  streamlit:
+    - "uv run streamlit run app.py"
+    - "If adapter folder is missing: app should show an info message and fall back to base model — not crash"
+    - "Once adapter is committed: select 'With LoRA adapter' radio button, enter 'Overnight Oats' — result should show Category D"
+    - "Select 'Base model', enter 'Overnight Oats' — result should show Category A (confirming baseline still holds)"
+    - "Toggle between both modes on the same input and confirm outputs differ for hard boundary cases"
+
+known_pitfalls:
+  - "Raw model.generate() does not enforce JSON format — unlike Ollama which guarantees valid JSON output. The adapter may generate preamble text, trailing text, or truncated JSON. Fix: extract the JSON object from the raw output using re.search(r'\\{.*\\}', output, re.DOTALL) before calling json.loads()."
+  - "Training and inference prompt format must match exactly. If few-shot examples were not included during training, do not pass them at inference time — the adapter will behave unpredictably on a format it never saw."
+  - "The adapter folder must contain both the LoRA weights AND the tokenizer files. Save both with model.save_pretrained() and tokenizer.save_pretrained() pointing to the same directory."

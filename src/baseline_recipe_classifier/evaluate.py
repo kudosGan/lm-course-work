@@ -12,7 +12,8 @@ from pathlib import Path
 from baseline_recipe_classifier.__main__ import (
     load_config,
     load_recipe_dataset,
-    predict_category
+    predict_category,
+    predict_with_adapter,
 )
 
 
@@ -194,6 +195,111 @@ def run_prompt_comparison(config, labeled_csv_path, eval_csv_path, dataset):
     return results
 
 
+def run_adapter_comparison(config, labeled_csv_path, eval_csv_path, dataset):
+    """
+    Compare base model (prompt_v2) vs LoRA adapter on the 15-pair eval set.
+
+    Uses the same balanced A/B/C + D/E structure as run_prompt_comparison().
+    Prints per-category accuracy table and D/E threshold decision.
+    """
+    ALL_CATS = ['A', 'B', 'C', 'D', 'E']
+
+    # A/B/C from prompt_eval.csv
+    eval_df = pd.read_csv(eval_csv_path)
+    abc_rows = []
+    for cat in ['A', 'B', 'C']:
+        sub = eval_df[eval_df['label'] == cat]
+        abc_rows.append(sub.sample(n=min(3, len(sub)), random_state=42))
+    abc_df = pd.concat(abc_rows, ignore_index=True)[['recipe', 'label']].copy()
+    abc_df['wait_mins'] = 0
+
+    # D/E from labeled dataset
+    labeled = pd.read_csv(labeled_csv_path)
+    de_rows = []
+    for cat in ['D', 'E']:
+        sub = labeled[labeled['Category Code'] == cat].dropna(subset=['Name', 'wait_mins'])
+        sampled = sub.sample(n=min(3, len(sub)), random_state=42)
+        for _, row in sampled.iterrows():
+            de_rows.append({'recipe': row['Name'], 'label': cat, 'wait_mins': int(row['wait_mins'])})
+    de_df = pd.DataFrame(de_rows)
+
+    full_eval = pd.concat([abc_df, de_df], ignore_index=True)
+    total = len(full_eval)
+
+    print(f"\nEval set: {total} golden pairs")
+    print("Distribution: " + ", ".join(
+        f"{cat}={len(full_eval[full_eval['label']==cat])}" for cat in ALL_CATS
+    ))
+
+    results = {'base': [], 'adapter': []}
+
+    print(f"\n[Running base model (prompt_v2)] {total} recipes...")
+    for _, row in full_eval.iterrows():
+        pred = predict_category(
+            row['recipe'], config, dataset=dataset,
+            use_context=True, prompt_version='v2',
+            wait_time=int(row['wait_mins'])
+        )
+        results['base'].append({
+            'recipe': row['recipe'], 'true': row['label'],
+            'pred': pred, 'correct': pred == row['label']
+        })
+
+    print(f"\n[Running LoRA adapter] {total} recipes...")
+    adapter_warned = False
+    for i, (_, row) in enumerate(full_eval.iterrows()):
+        pred = predict_with_adapter(row['recipe'], config, wait_mins=int(row['wait_mins']))
+        if pred is None and not adapter_warned:
+            print("  Adapter not available — results will mirror base model.", file=sys.stderr)
+            adapter_warned = True
+        if pred is None:
+            pred = results['base'][i]['pred']
+        results['adapter'].append({
+            'recipe': row['recipe'], 'true': row['label'],
+            'pred': pred, 'correct': pred == row['label']
+        })
+
+    # Comparison table
+    print(f"\n{'='*72}")
+    print("BASE MODEL (prompt_v2) vs LORA ADAPTER — PER-CATEGORY ACCURACY")
+    print(f"{'='*72}")
+    print(f"  {'Category':<12}  {'base':>7}  {'adapter':>9}  {'base n/N':>8}  {'adpt n/N':>8}")
+    print("-" * 72)
+
+    de_base_c = de_base_t = de_adpt_c = de_adpt_t = 0
+    for cat in ALL_CATS:
+        base_rows = [r for r in results['base'] if r['true'] == cat]
+        adpt_rows = [r for r in results['adapter'] if r['true'] == cat]
+        if not base_rows:
+            continue
+        bc = sum(1 for r in base_rows if r['correct'])
+        ac = sum(1 for r in adpt_rows if r['correct'])
+        n = len(base_rows)
+        marker = " <- threshold" if cat in ('D', 'E') else ""
+        print(f"  {cat:<12}  {bc/n*100:>5.0f}%  {ac/n*100:>7.0f}%  {bc:>3}/{n}      {ac:>3}/{n}{marker}")
+        if cat in ('D', 'E'):
+            de_base_c += bc; de_base_t += n
+            de_adpt_c += ac; de_adpt_t += n
+
+    base_overall = sum(1 for r in results['base'] if r['correct']) / total * 100
+    adpt_overall = sum(1 for r in results['adapter'] if r['correct']) / total * 100
+    print("-" * 72)
+    print(f"  {'Overall':<12}  {base_overall:>5.0f}%  {adpt_overall:>7.0f}%")
+
+    de_base_acc = de_base_c / de_base_t * 100 if de_base_t else 0
+    de_adpt_acc = de_adpt_c / de_adpt_t * 100 if de_adpt_t else 0
+    print(f"\n  D+E combined:  base={de_base_acc:.0f}%  adapter={de_adpt_acc:.0f}%  (threshold: 70%)")
+
+    print(f"\n{'='*72}")
+    if de_adpt_acc >= 70:
+        print("GOAL MET — adapter brings D/E accuracy to >= 70% threshold.")
+    else:
+        print(f"Below threshold ({de_adpt_acc:.0f}% < 70%) — consider more boundary case examples or adjust LoRA rank.")
+    print(f"{'='*72}\n")
+
+    return results
+
+
 def main():
     import argparse
 
@@ -234,6 +340,11 @@ def main():
         action="store_true",
         help="Run prompt_v1 vs prompt_v2 comparison on balanced A-E eval set"
     )
+    parser.add_argument(
+        "--adapter-compare",
+        action="store_true",
+        help="Run base model (prompt_v2) vs LoRA adapter comparison on balanced A-E eval set"
+    )
 
     args = parser.parse_args()
 
@@ -269,6 +380,17 @@ def main():
     if 'Category Code' not in dataset.columns:
         print("Error: Dataset missing 'Category Code' column", file=sys.stderr)
         sys.exit(1)
+
+    # --adapter-compare: base model vs LoRA adapter
+    if args.adapter_compare:
+        package_dir = os.path.dirname(__file__)
+        project_root = os.path.dirname(os.path.dirname(package_dir))
+        eval_csv = os.path.join(project_root, 'data', 'prompt_eval.csv')
+        if not os.path.exists(eval_csv):
+            print(f"Error: eval set not found at {eval_csv}", file=sys.stderr)
+            sys.exit(1)
+        run_adapter_comparison(config, dataset_path, eval_csv, dataset)
+        return
 
     # --compare: prompt_v1 vs prompt_v2 on balanced A-E eval set
     if args.compare:
