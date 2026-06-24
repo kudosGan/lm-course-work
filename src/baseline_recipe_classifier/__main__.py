@@ -260,23 +260,42 @@ def predict_with_adapter(dish_name, config, wait_mins=0, adapter_path=None):
         return None
 
 
-def build_prompt_v2(dish_name: str, ingredients: str, wait_time: int, categories: dict) -> list:
+def build_prompt_v2(
+    dish_name: str,
+    ingredients: str,
+    wait_time: int,
+    categories: dict,
+    skill_context: dict | None = None,
+) -> list:
     """
     Build a few-shot classification prompt as a messages list for ollama.chat().
 
     Uses one example per category (A–E) in the conversation history so the model
     sees all five time boundaries, with explicit wait_time field to prevent the
     A/D confusion caused by the model ignoring wait signals in free-text instructions.
+
+    If skill_context is provided (from infer_skill_from_history), the system prompt
+    includes the user's inferred skill level and notes to personalize the estimate.
     """
     cat_defs = "\n".join([
         f"  {code}: {info['name']} — {info['description']}"
         for code, info in categories.items()
     ])
 
+    skill_line = ""
+    if skill_context and skill_context.get("inferred_skill") != "unknown":
+        skill_line = (
+            f"\nUser skill level: {skill_context['inferred_skill']}. "
+            f"{skill_context['skill_notes']} "
+            "Adjust your time estimate to reflect the actual time this user will need, "
+            "not the time an expert would need."
+        )
+
     system_content = (
         "You are a recipe time classifier. Given a recipe name, ingredients, and wait time, "
         "classify it into one of five categories:\n"
-        f"{cat_defs}\n\n"
+        f"{cat_defs}\n"
+        f"{skill_line}\n"
         'Respond with JSON only: {"category": "A"|"B"|"C"|"D"|"E", '
         '"reasoning": "brief explanation", "confidence": "high"|"medium"|"low"}'
     )
@@ -345,7 +364,7 @@ def build_prompt_v2(dish_name: str, ingredients: str, wait_time: int, categories
 
 
 def predict_category(dish_name, config, dataset=None, use_context=True,
-                     prompt_version='v1', wait_time=None):
+                     prompt_version='v1', wait_time=None, skill_context=None):
     """
     Predict recipe time category using Ollama.
 
@@ -378,7 +397,8 @@ def predict_category(dish_name, config, dataset=None, use_context=True,
             effective_wait = context.get('wait_mins', 0) if context else 0
 
         messages = build_prompt_v2(
-            dish_name, ingredients_str, effective_wait, config['categories']
+            dish_name, ingredients_str, effective_wait, config['categories'],
+            skill_context=skill_context,
         )
 
         try:

@@ -1,0 +1,215 @@
+# Week 6 Semantic Search and RAG - Implementation Specs
+
+approach:
+  summary: >
+    Add a RAG-based user skill inference layer that embeds the user's cooking history,
+    retrieves the closest reference profile from a ChromaDB user_profiles collection,
+    and uses the matched inferred_skill and skill_notes to personalize the recipe time
+    classification — replacing the static self-reported skill label from Week 4.
+  decisions:
+    just_in_time_context:
+      choice: Retrieve user skill profile at runtime from ChromaDB based on cooking history embedding
+      reasoning: >
+        Cooking history is unique per user and grows over time, so it cannot go in the
+        static system prompt (same for everyone) or be hardcoded in the user prompt
+        (would not reflect actual evidence). It must be retrieved at runtime — matching
+        the RAG column in the decision table from the notebook.
+
+    data_source:
+      choice: Synthetic reference user profiles stored as a ChromaDB collection named user_profiles
+      reasoning: >
+        No existing user history data exists in the project. A synthetic set of reference
+        profiles (e.g. Alice, Bob, Carol) covering a range of skill patterns is created
+        to populate the vector store. Each profile captures real skill signals — recipes
+        attempted, outcomes, and characteristic failure modes.
+
+    chunking_and_embedding:
+      choice: No chunking — each profile is one compact record string embedded as a single vector
+      reasoning: >
+        User profiles are short structured facts, not long documents. Embedding the entire
+        record (recipes + outcome notes) as one unit preserves the semantic relationship
+        between the attempts and outcomes that skill inference depends on.
+
+    metadata_plan:
+      choice: Two metadata fields — inferred_skill and skill_notes — used post-retrieval, no pre-filtering
+      reasoning: >
+        Hard-filtering on inferred_skill before the similarity step would undermine the
+        whole purpose of Layer 1: catching users who misreport their skill level. Embedding
+        similarity alone selects the closest profile; inferred_skill and skill_notes are
+        then read from the matched document's metadata and passed to the LLM.
+
+    problem_statement_update:
+      choice: Shift from generic time classification to personalized time estimation per user
+      reasoning: >
+        Category B for carbonara may be correct for an expert, but Category C is the honest
+        answer for a user who has scrambled the eggs on every attempt. RAG enables the app
+        to give that personalized answer by combining retrieved skill evidence with the
+        recipe classification — making the output genuinely useful to this specific user
+        rather than an average-skill estimate.
+
+    streamlit_ui:
+      choice: >
+        Cooking history text area → inferred skill badge with skill_notes → collapsible
+        "how we personalized this" section showing matched profile and retrieved context
+      reasoning: >
+        Showing the inferred skill level and the matched reference profile gives users
+        transparency into why the app produced a specific time estimate. Making the
+        reasoning visible builds trust and lets users catch and correct mismatches.
+
+tasks:
+  task_1:
+    name: Create synthetic reference user profiles
+    details: |
+      Create a script or module at src/baseline_recipe_classifier/retrieval/seed_profiles.py
+      that defines a list of synthetic user profiles. Each profile is a dict with:
+        - "history": a string describing recipes attempted and outcomes (the embedding unit)
+        - "inferred_skill": one of "beginner", "intermediate-leaning-beginner",
+          "intermediate", "advanced"
+        - "skill_notes": one sentence describing this user's specific struggle or strength
+
+      Include at least 6 profiles covering:
+        - A true beginner (only simple dishes, no failures yet)
+        - An intermediate-leaning-beginner (some failures on technique-heavy steps, e.g. Alice)
+        - A confident intermediate (varied dishes, recovers from failures)
+        - An advanced user (complex techniques, consistent success)
+        - A user who overestimates their skill (self-reports advanced, history shows beginner)
+        - A user who underestimates their skill (self-reports beginner, history shows intermediate)
+
+      Example Alice profile:
+        history: "scrambled eggs 5 times (2 overcooked), grilled cheese 4 times,
+                  pasta with tomato sauce 3 times, carbonara 2 attempts (scrambled eggs both times)"
+        inferred_skill: "intermediate-leaning-beginner"
+        skill_notes: "Struggles with off-heat technique steps requiring precise temperature control"
+
+  task_2:
+    name: Populate ChromaDB user_profiles collection
+    details: |
+      Extend src/baseline_recipe_classifier/retrieval/vector_store.py (or add a new
+      init_user_profiles.py alongside it) with a function:
+
+        def seed_user_profiles(client: chromadb.Client) -> chromadb.Collection:
+
+      This function should:
+        1. Get or create a collection named "user_profiles"
+        2. For each profile in seed_profiles.py:
+           - Generate a unique ID (e.g. "user_001")
+           - Embed the "history" string using the same embedding model used elsewhere
+             in the project (check vector_store.py for the embedding function)
+           - Add the document with metadata: {inferred_skill: ..., skill_notes: ...}
+        3. Return the collection
+
+      Call seed_user_profiles() once at app startup (in __main__.py or app.py) if the
+      collection does not already exist (check collection.count() == 0 before seeding).
+
+  task_3:
+    name: Implement runtime skill inference via retrieval
+    details: |
+      Add a function to src/baseline_recipe_classifier/retrieval/vector_store.py:
+
+        def infer_skill_from_history(
+            history: str,
+            client: chromadb.Client,
+            n_results: int = 1
+        ) -> dict:
+
+      This function should:
+        1. Embed the user's history string
+        2. Query the "user_profiles" collection for n_results=1 nearest neighbour
+        3. Return a dict with:
+           {
+             "inferred_skill": <metadata value>,
+             "skill_notes": <metadata value>,
+             "matched_profile": <the document string of the matched profile>
+           }
+
+      No metadata pre-filtering — let embedding similarity alone determine the match.
+
+  task_4:
+    name: Integrate inferred skill into the classifier prompt
+    details: |
+      In src/baseline_recipe_classifier/__main__.py (or wherever the LLM prompt is built),
+      replace the static skill label with the retrieved inferred_skill and skill_notes.
+
+      Before building the prompt:
+        skill_result = infer_skill_from_history(user_history, chroma_client)
+
+      In the system or user prompt, replace any hardcoded skill reference with:
+        f"User skill level: {skill_result['inferred_skill']}. {skill_result['skill_notes']}"
+
+      Pass skill_result through to the Streamlit layer so it can be displayed in the UI.
+
+  task_5:
+    name: Update Streamlit UI with cooking history input and skill inference display
+    details: |
+      In the Streamlit app (app.py or equivalent):
+
+      1. Replace the static skill level dropdown with a multiline text area:
+           user_history = st.text_area(
+               "Your cooking history",
+               placeholder="e.g. scrambled eggs 5 times, pasta 3 times, one failed carbonara attempt",
+               height=120
+           )
+
+      2. After the user submits, call infer_skill_from_history() and display the result
+         as a visible result card immediately below the history input:
+           st.info(f"Inferred skill: **{skill_result['inferred_skill']}**")
+           st.caption(skill_result['skill_notes'])
+
+      3. Add a collapsible expander section below the skill card:
+           with st.expander("How we personalized this"):
+               st.write("**Matched reference profile:**")
+               st.write(skill_result['matched_profile'])
+
+      4. Pass the inferred_skill and skill_notes into the classifier as described in task_4.
+
+      First-time user handling: if the history text area is empty, skip retrieval and
+      fall back to a neutral skill label ("unknown") with a skill_notes of
+      "No history provided — showing general time estimate."
+
+integration_steps:
+  - "vector_store.py already exists at src/baseline_recipe_classifier/retrieval/vector_store.py — add seed_user_profiles() and infer_skill_from_history() to this file"
+  - "seed_profiles.py is a new file at src/baseline_recipe_classifier/retrieval/seed_profiles.py — import it from vector_store.py"
+  - "Call seed_user_profiles() at startup in __main__.py or app.py before the first query is processed"
+  - "Remove or deprecate the static skill label / dropdown from the Week 4 prompt — inferred_skill replaces it"
+  - "Pass skill_result dict from the retrieval layer up to the Streamlit layer for display"
+  - "The ChromaDB client used for user_profiles should be the same client instance used for recipe retrieval — check how the client is initialised in vector_store.py and reuse it"
+
+evaluation_plan:
+  metrics:
+    - retrieval_accuracy: fraction of test history inputs that retrieve the correct reference profile
+    - classification_delta: change in time category accuracy vs Week 4 static-label baseline
+  dataset_size: 6 retrieval test cases (one per reference profile) plus existing eval set for classification delta
+  baseline: Week 4 classifier with hardcoded static skill label in the prompt
+  evaluation_steps: |
+    1. For each of the 6 reference profiles, construct a new history string that is
+       semantically similar but not identical to the stored profile.
+    2. Run infer_skill_from_history() on each and check that the returned inferred_skill
+       matches the expected profile.
+    3. Run uv run python -m baseline_recipe_classifier.evaluate --num-samples 20 --verbose
+       with and without skill context to measure classification delta.
+
+reference_materials:
+  notebook: notebooks/week6_semantic_search_and_rag.ipynb
+
+success_criteria:
+  minimum: >
+    infer_skill_from_history() retrieves the correct reference profile for at least 4 of
+    the 6 test cases, and the Streamlit UI shows the inferred skill badge and collapsible
+    context section without errors
+  good: >
+    All 6 retrieval test cases return the correct profile, classification accuracy on the
+    20-sample eval set improves or holds vs Week 4 baseline, and the UI correctly handles
+    the empty-history fallback case
+
+verification:
+  cli:
+    - "Run: uv run python -m baseline_recipe_classifier.retrieval.vector_store (or a seed script) to populate the user_profiles collection"
+    - "Run: uv run python -m baseline_recipe_classifier 'carbonara' with a test history input and verify the output includes the inferred skill label in the prompt or response"
+    - "Run: uv run python -m baseline_recipe_classifier.evaluate --num-samples 20 --verbose and confirm no errors related to the skill retrieval step"
+  streamlit:
+    - "Run: uv run streamlit run app.py"
+    - "Enter a cooking history in the text area (e.g. 'scrambled eggs 5 times, carbonara 2 attempts both scrambled') and submit"
+    - "Verify the inferred skill badge appears below the history input with skill_notes text"
+    - "Verify the 'How we personalized this' expander opens and shows the matched reference profile"
+    - "Submit with an empty history field and verify the app falls back gracefully without crashing"
+    - "Confirm the final time classification result is still displayed and reflects the personalized skill context"

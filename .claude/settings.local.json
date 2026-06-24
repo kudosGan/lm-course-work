@@ -3,7 +3,10 @@
     "allow": [
       "Bash(uv run *)",
       "PowerShell(Get-Command *)",
-      "Skill(generate-spec)"
+      "Skill(generate-spec)",
+      "Skill(build-student-context)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

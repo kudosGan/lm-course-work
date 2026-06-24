@@ -2,8 +2,10 @@
 ChromaDB-backed vector store for recipe retrieval.
 
 Public API:
-  add(records)             — embed and persist a batch of labeled recipes
-  query(text, ...)         — retrieve the most similar example per label (k=5 total)
+  add(records)                  — embed and persist a batch of labeled recipes
+  query(text, ...)              — retrieve the most similar example per label (k=5 total)
+  seed_user_profiles(path)      — populate the user_profiles collection once at startup
+  infer_skill_from_history(...) — retrieve the closest user skill profile at runtime
 """
 
 import ollama
@@ -11,15 +13,21 @@ import chromadb
 
 CHROMA_PATH = "retrieval/chroma_db"
 COLLECTION_NAME = "recipes"
+USER_PROFILES_COLLECTION = "user_profiles"
 EMBED_MODEL = "mxbai-embed-large"
 
 _collection = None
+_user_profiles_collection = None
 
 
-def _get_collection() -> chromadb.Collection:
+def _get_client(chroma_path: str = CHROMA_PATH) -> chromadb.PersistentClient:
+    return chromadb.PersistentClient(path=chroma_path)
+
+
+def _get_collection(chroma_path: str = CHROMA_PATH) -> chromadb.Collection:
     global _collection
     if _collection is None:
-        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        client = _get_client(chroma_path)
         _collection = client.get_or_create_collection(
             name=COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
@@ -120,3 +128,62 @@ def query(
             continue
 
     return results
+
+
+def seed_user_profiles(chroma_path: str = CHROMA_PATH) -> chromadb.Collection:
+    """
+    Populate the user_profiles collection with synthetic reference profiles.
+    Safe to call multiple times — skips seeding if collection is already populated.
+    """
+    global _user_profiles_collection
+    from .seed_profiles import USER_PROFILES
+
+    client = _get_client(chroma_path)
+    collection = client.get_or_create_collection(
+        name=USER_PROFILES_COLLECTION,
+        metadata={"hnsw:space": "cosine"},
+    )
+    _user_profiles_collection = collection
+
+    if collection.count() > 0:
+        return collection
+
+    ids = [p["id"] for p in USER_PROFILES]
+    documents = [p["history"] for p in USER_PROFILES]
+    metadatas = [
+        {"inferred_skill": p["inferred_skill"], "skill_notes": p["skill_notes"]}
+        for p in USER_PROFILES
+    ]
+    embeddings = [
+        ollama.embed(model=EMBED_MODEL, input=doc)["embeddings"][0]
+        for doc in documents
+    ]
+    collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+    return collection
+
+
+def infer_skill_from_history(history: str, chroma_path: str = CHROMA_PATH) -> dict:
+    """
+    Embed the user's cooking history and return the closest reference skill profile.
+
+    Returns a dict with keys: inferred_skill, skill_notes, matched_profile.
+    Embedding similarity alone decides the match — no metadata pre-filtering.
+    """
+    global _user_profiles_collection
+    if _user_profiles_collection is None:
+        _user_profiles_collection = seed_user_profiles(chroma_path)
+
+    embedding = ollama.embed(model=EMBED_MODEL, input=history)["embeddings"][0]
+    result = _user_profiles_collection.query(
+        query_embeddings=[embedding],
+        n_results=1,
+        include=["documents", "metadatas"],
+    )
+
+    meta = result["metadatas"][0][0]
+    doc = result["documents"][0][0]
+    return {
+        "inferred_skill": meta["inferred_skill"],
+        "skill_notes": meta["skill_notes"],
+        "matched_profile": doc,
+    }
