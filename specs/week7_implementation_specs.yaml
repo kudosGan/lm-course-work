@@ -1,0 +1,232 @@
+# Week 7 Multimodal Models - Implementation Specs
+
+approach:
+  summary: >
+    Add an optional vision entry point to the existing pipeline by implementing an
+    extract_from_image() function that uses a multimodal model to extract recipe_name,
+    ingredients, directions, and prep_time from a photo of a recipe card or cookbook
+    page, then feeds those fields into the unchanged Week 1-6 shared pipeline.
+  decisions:
+    visual_input_type:
+      choice: >
+        Single extraction prompt handles both structured meal kit cards and unstructured
+        cookbook pages — no branching logic.
+      reasoning: >
+        Target users may have either type. A unified prompt that asks explicitly for
+        actionable ingredients and numbered steps (not tips, decorative text, or serving
+        suggestions) is robust enough for both layouts and keeps the implementation simple.
+
+    extraction_schema:
+      choice: >
+        Four fields: recipe_name (string), ingredients (list of strings),
+        directions (list of strings), prep_time (string or null).
+      reasoning: >
+        These are the only fields that drive time classification. recipe_name feeds the
+        classifier prompt; ingredients adds technique context; directions feeds the Week 6
+        ChromaDB retrieval query; prep_time hints at D/E detection. Servings, calories,
+        and nutritional info are excluded because they add noise without improving accuracy.
+
+    pipeline_connection:
+      choice: >
+        Two optional entry points (text input, photo input) merge at the same shared
+        4-stage pipeline. Nothing downstream changes.
+      reasoning: >
+        The extraction step is a new front door that produces the same text fields the
+        pipeline already expects. recipe_name passes directly to the classifier;
+        ingredients joins as a bullet list in the prompt; the first 2-3 directions feed
+        the technique retrieval ChromaDB query; prep_time is passed as a hint for D/E
+        detection. All Week 1-6 components are unchanged.
+
+    hallucination_mitigation:
+      choice: >
+        Two-layer validation: structural check first, then semantic plausibility check
+        via ChromaDB similarity score. Failures surface to the user rather than passing
+        silently.
+      reasoning: >
+        Missing fields and wrong formats are detectable and recoverable. Hallucination
+        (wrong recipe name, invented ingredients) is the primary risk because it would
+        silently corrupt classification with no visible error. Structural check catches
+        format failures; semantic check catches content plausibility failures by comparing
+        the extracted recipe_name against the existing recipe ChromaDB collection.
+
+    problem_statement_update:
+      choice: >
+        Revised to include physical recipe sources (cookbook, meal kit card, recipe card
+        from a friend) and remove the typing requirement. Core ask unchanged.
+      reasoning: >
+        Before Week 7 the user had to know the recipe name already. After Week 7 they can
+        point their phone at any recipe source and get a personalized time estimate without
+        typing. The new statement: "I want to take a quick photo and get an honest
+        personalized estimate of how long it will really take ME to make, based on my
+        actual cooking history, so I can decide in seconds whether to attempt it tonight
+        or order takeout instead."
+
+    streamlit_layout:
+      choice: >
+        st.tabs with "Text input" (existing) and "Photo input" (new) tabs. Photo tab has
+        three explicit states: before upload, successful extraction, extraction failure.
+      reasoning: >
+        Mirroring the existing text tab layout maintains consistency for users switching
+        between tabs. Three explicit states make the failure path obvious and friendly —
+        showing a checklist of image quality tips and a fallback-to-text-tab button rather
+        than a technical error. Pre-populating the skill badge after extraction rewards
+        users for using the photo path.
+
+tasks:
+  task_1:
+    name: Implement extract_from_image() in a new vision module
+    details: |
+      Create src/baseline_recipe_classifier/vision.py with a single public function:
+
+        extract_from_image(image_path: str) -> dict
+
+      The function should:
+      1. Load the image from image_path (support JPG, PNG, WEBP).
+      2. Call the multimodal model (gemma4 or llava via Ollama) with a prompt that asks
+         for ONLY actionable ingredients and numbered steps — explicitly excluding tips,
+         serving suggestions, and decorative text.
+      3. Parse the JSON response into a dict with keys:
+           recipe_name (str), ingredients (list[str]), directions (list[str]),
+           prep_time (str | None)
+      4. Run structural validation: verify all four keys exist, ingredients and directions
+         are lists with len >= 1. If validation fails, send the raw output back to
+         gemma2:2b with a corrector prompt asking it to reformat as valid JSON.
+      5. Run semantic validation: embed recipe_name and query the existing recipe
+         ChromaDB collection. If the top similarity score is below a configurable
+         threshold (default 0.3), raise an ExtractionUncertainError with the extracted
+         text so the caller can surface it to the user.
+      6. Return the validated dict on success.
+
+      Extraction prompt template (adapt as needed):
+        "You are a recipe extraction assistant. Look at this recipe image and return ONLY
+        a JSON object with these exact fields:
+        - recipe_name: the name of the dish as a string
+        - ingredients: a list of strings, one ingredient per item, actionable items only
+        - directions: a list of strings, one numbered step per item, actionable steps only
+        - prep_time: the prep time as a string if shown, or null
+        Do not include tips, notes, serving suggestions, or nutritional information.
+        Return only the JSON object, no other text."
+
+  task_2:
+    name: Wire extract_from_image() into the main classifier entry point
+    details: |
+      In src/baseline_recipe_classifier/__main__.py (or wherever classify() is called),
+      add an optional image_path parameter to the classification flow:
+
+        classify(recipe_name: str, ingredients: list[str] | None = None,
+                 directions: list[str] | None = None, prep_time: str | None = None)
+
+      When called from the photo path:
+      - Pass ingredients as a bullet-joined string appended to the classifier prompt.
+      - Pass directions[0:3] joined as a single query string to the Week 6 technique
+        retrieval ChromaDB search (replacing or augmenting the recipe_name query).
+      - Pass prep_time as a hint in the prompt for D/E detection if not None.
+
+      The text input path continues to call classify(recipe_name) with no changes.
+
+  task_3:
+    name: Add Photo input tab to Streamlit app
+    details: |
+      In the Streamlit app (app.py or equivalent), wrap the existing interface in
+      st.tabs(["Text input", "Photo input"]).
+
+      Photo input tab — three states:
+
+      STATE 1 — Before upload:
+        uploaded_file = st.file_uploader(
+            "Photograph a recipe card or cookbook page",
+            type=["jpg", "jpeg", "png", "webp"]
+        )
+
+      STATE 2 — Successful extraction (uploaded_file is not None, extraction succeeded):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(uploaded_file)
+        with col2:
+            st.success(f"Extracted: {result['recipe_name']}")
+            st.write(f"{len(result['ingredients'])} ingredients found")
+            st.write(f"{len(result['directions'])} steps found")
+            # Pre-populate skill badge from Week 6 here
+        # Show classify button below columns
+        if st.button("Classify"):
+            # Run shared pipeline with extracted fields
+
+      STATE 3 — Extraction failure (structural or semantic check failed):
+        st.warning("Could not confidently extract the recipe. Try:")
+        st.markdown("- Make sure the image is well lit\n- Hold the camera steady\n"
+                    "- Make sure all text is visible and in focus")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.button("Try again", on_click=lambda: st.rerun())
+        with col2:
+            st.info("Or switch to the Text input tab to type the recipe name manually.")
+
+      For ExtractionUncertainError (semantic check failed), show the extracted text and
+      ask the user to confirm before classifying — do not silently pass it through.
+
+  task_4:
+    name: Add evaluation test for vision extraction
+    details: |
+      Add a test in evaluate.py or a new eval_vision.py that:
+      1. Loads a test image of a Pasta Carbonara recipe card (place a sample image in
+         data/test_images/pasta_carbonara.jpg).
+      2. Calls extract_from_image() and checks:
+         - All four fields present
+         - ingredients is a list with len >= 4
+         - directions is a list with len >= 4
+         - "carbonara" in recipe_name.lower()
+         - At least one direction step contains "egg" or "yolk" (the critical tempering step)
+      3. Then runs the full vision-augmented pipeline and compares the classification
+         output against the text-only baseline for the same recipe.
+      Run with: uv run python -m baseline_recipe_classifier.eval_vision
+
+integration_steps:
+  - Create src/baseline_recipe_classifier/vision.py with extract_from_image().
+  - Import vision.extract_from_image in __main__.py and app.py — do not modify any
+    Week 1-6 modules.
+  - The classify() function signature gains optional ingredients, directions, prep_time
+    parameters; default values preserve the existing text-only call signature exactly.
+  - Week 6 technique retrieval query gains an optional directions_context parameter;
+    when provided, uses first 2-3 joined direction steps instead of recipe_name alone.
+  - No changes to config.yaml structure required; optionally add a
+    vision.similarity_threshold key (default 0.3) for the semantic check cutoff.
+  - Add data/test_images/ directory for evaluation images (git-ignore large files).
+
+evaluation_plan:
+  metrics:
+    - extraction structural pass rate (all fields present, correct types)
+    - extraction semantic pass rate (ChromaDB similarity >= threshold)
+    - full pipeline classification accuracy on existing eval set (vision path vs text path)
+    - critical step detection rate (egg tempering step present in directions for Carbonara)
+  dataset_size: 1 dedicated vision test case (Pasta Carbonara) + existing eval set for pipeline comparison
+  baseline: >
+    Week 1-6 text-only pipeline classification result for "Pasta Carbonara" — compare
+    against vision-augmented result to confirm parity or improvement.
+
+reference_materials:
+  notebook: notebooks/week7_multimodal_models.ipynb
+
+success_criteria:
+  minimum: >
+    extract_from_image() returns a structurally valid dict for the Pasta Carbonara test
+    image, and the full vision-augmented pipeline produces the same or better
+    classification as the text-only baseline for the same recipe.
+  good: >
+    Photo input tab in Streamlit shows all three states correctly (before upload,
+    successful extraction with skill badge, extraction failure with fallback), and
+    semantic validation correctly surfaces a low-confidence extraction to the user
+    rather than silently passing it through.
+
+verification:
+  cli:
+    - "uv run python -m baseline_recipe_classifier.eval_vision"
+    - "Check output: all four extraction fields present, ingredients and directions are lists, 'carbonara' in recipe_name, at least one direction mentions egg or yolk"
+    - "Check pipeline output: classification result printed with time category A-E and personalized explanation"
+  streamlit:
+    - "uv run streamlit run app.py"
+    - "Open http://localhost:8501 — confirm st.tabs shows 'Text input' and 'Photo input' tabs"
+    - "Click 'Photo input' tab — confirm file uploader appears with friendly prompt text"
+    - "Upload a recipe card image (JPG/PNG) — confirm photo appears on left, extracted fields on right, classify button below"
+    - "Click Classify — confirm time category and personalized explanation appear"
+    - "Test failure state: upload a non-recipe image (e.g. a blank photo) — confirm yellow warning and retry/fallback buttons appear, no crash"
+    - "Switch back to Text input tab — confirm existing text-entry flow still works unchanged"

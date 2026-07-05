@@ -9,6 +9,10 @@ dataset:
 
 adapter_path: "adapters/recipe_d_e"
 
+vision:
+  model: "gemma4:e4b"        # multimodal Ollama model for image extraction
+  similarity_threshold: 0.3  # minimum ChromaDB similarity to trust extraction
+
 categories:
   A:
     name: "Quick, No-Wait"

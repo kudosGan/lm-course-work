@@ -364,7 +364,8 @@ def build_prompt_v2(
 
 
 def predict_category(dish_name, config, dataset=None, use_context=True,
-                     prompt_version='v1', wait_time=None, skill_context=None):
+                     prompt_version='v1', wait_time=None, skill_context=None,
+                     ingredients=None, directions=None):
     """
     Predict recipe time category using Ollama.
 
@@ -384,14 +385,17 @@ def predict_category(dish_name, config, dataset=None, use_context=True,
         context = lookup_dish_context(dish_name, dataset)
 
     if prompt_version == 'v2':
-        # Build ingredients string (up to 6 items for brevity)
-        ingredients_str = "not available"
-        if context and context.get('ingredients'):
+        # Vision-extracted ingredients take priority over dataset lookup
+        if ingredients is not None:
+            ingredients_str = ' | '.join(str(i).strip() for i in ingredients[:6])
+        elif context and context.get('ingredients'):
             ingredients_str = ' | '.join(
                 i.strip() for i in context['ingredients'][:6]
             )
+        else:
+            ingredients_str = "not available"
 
-        # Use provided wait_time, or fall back to dataset value
+        # wait_time: explicit arg > vision prep_time hint > dataset value
         effective_wait = wait_time
         if effective_wait is None:
             effective_wait = context.get('wait_mins', 0) if context else 0
