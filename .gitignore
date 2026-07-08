@@ -27,3 +27,7 @@ finetuning/finetune_data.jsonl
 
 # Claude Code local state
 .claude/hooks/state/
+
+# Vision debug logs
+vision_debug.txt
+vision/vision_debug.txt
