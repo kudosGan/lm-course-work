@@ -14,7 +14,7 @@ import chromadb
 CHROMA_PATH = "retrieval/chroma_db"
 COLLECTION_NAME = "recipes"
 USER_PROFILES_COLLECTION = "user_profiles"
-EMBED_MODEL = "mxbai-embed-large"
+EMBED_MODEL = "nomic-embed-text"
 
 _collection = None
 _user_profiles_collection = None

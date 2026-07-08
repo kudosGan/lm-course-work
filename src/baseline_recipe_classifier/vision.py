@@ -19,14 +19,20 @@ EMBED_MODEL = "mxbai-embed-large"
 CHROMA_PATH = "retrieval/chroma_db"
 RECIPES_COLLECTION = "recipes"
 
-EXTRACTION_PROMPT = """Extract the recipe from this image.
-Return JSON only — no explanation, no markdown fences.
-Required fields:
-  recipe_name: string — the name of the dish
-  ingredients: list of strings — one ingredient per item, actionable items only, no tips or notes
-  directions: list of strings — one numbered step per item, actionable steps only, no intro text
-  prep_time: string if prep/cook time is shown on the image, or null if not visible
-Do not include serving suggestions, nutritional information, or decorative text."""
+EXTRACTION_PROMPT = """Look at this recipe image carefully.
+
+YOUR TASK: Output ONLY a single JSON object. Do NOT write any sentences, explanations, or markdown. Do NOT use ```json fences.
+
+The JSON must have exactly these four keys:
+  "recipe_name" — string with the name of the dish
+  "ingredients" — JSON array of strings, one ingredient per string, actionable items only
+  "directions"  — JSON array of strings, one step per string, actionable steps only
+  "prep_time"   — string if prep/cook time is visible in the image, or null if not shown
+
+Example of the EXACT format you must output:
+{"recipe_name":"Pasta Primavera","ingredients":["200g pasta","1 cup cherry tomatoes","2 tbsp olive oil"],"directions":["Boil pasta until al dente.","Sauté tomatoes in olive oil.","Combine and serve."],"prep_time":"20 minutes"}
+
+Now output the JSON for the recipe in the image. Start your response with { and end it with }. No other text."""
 
 CORRECTOR_PROMPT = """The following text was supposed to be a JSON object with these fields:
   recipe_name (string), ingredients (list of strings), directions (list of strings), prep_time (string or null)
@@ -57,21 +63,39 @@ def _call_vision_model(image_path: str, vision_model: str) -> str:
             "content": EXTRACTION_PROMPT,
             "images": [image_b64],
         }],
+        options={"temperature": 0},
     )
-    return response["message"]["content"].strip()
+    raw = response["message"]["content"].strip()
+
+    with open(_DEBUG_LOG, "a", encoding="utf-8") as dbg:
+        dbg.write(f"=== {Path(image_path).name} (model: {vision_model}) ===\n{raw}\n\n")
+
+    return raw
+
+
+_DEBUG_LOG = Path(__file__).parent.parent.parent / "vision_debug.txt"
 
 
 def _parse_json(raw: str) -> dict | None:
-    # Strip markdown fences if present
-    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
-    cleaned = re.sub(r"\s*```$", "", cleaned.strip())
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if not match:
-        return None
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
+    cleaned = re.sub(r"```\s*$", "", cleaned, flags=re.MULTILINE).strip()
+
+    # Strategy 1: direct parse
     try:
-        return json.loads(match.group())
+        return json.loads(cleaned)
     except json.JSONDecodeError:
-        return None
+        pass
+
+    # Strategy 2: greedy brace span
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(cleaned[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def _structural_check(data: dict) -> bool:
@@ -150,21 +174,29 @@ def extract_from_image(
         chroma_path: Path to ChromaDB store for semantic check.
                      Falls back to CHROMA_PATH constant if None.
     """
-    vision_model = "gemma4:e4b"
+    vision_model = "llava:7b"
     text_model = "gemma2:2b"
     threshold = 0.3
 
     if config:
         vision_cfg = config.get("vision", {})
-        vision_model = vision_cfg.get("model", vision_model)
+        vision_model = vision_cfg.get("vision_model", vision_cfg.get("model", vision_model))
         text_model = config.get("model", {}).get("name", text_model)
         threshold = vision_cfg.get("similarity_threshold", threshold)
 
     if chroma_path is None:
         chroma_path = CHROMA_PATH
 
+    with open(_DEBUG_LOG, "a", encoding="utf-8") as dbg:
+        dbg.write(f"=== extract_from_image called: {image_path} | model: {vision_model} ===\n")
+
     # Step 1: call vision model
-    raw = _call_vision_model(image_path, vision_model)
+    try:
+        raw = _call_vision_model(image_path, vision_model)
+    except Exception as exc:
+        with open(_DEBUG_LOG, "a", encoding="utf-8") as dbg:
+            dbg.write(f"ERROR in _call_vision_model: {exc}\n\n")
+        raise
 
     # Step 2: parse JSON
     parsed = _parse_json(raw)

@@ -4,9 +4,17 @@
       "Bash(uv run *)",
       "PowerShell(Get-Command *)",
       "Skill(generate-spec)",
-      "Skill(build-student-context)",
+      "PowerShell(New-Item *)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Skill(assignment-partner)",
+      "Bash(ollama list *)",
+      "Bash(Get-Content *)",
+      "PowerShell(ollama run *)",
+      "Skill(run)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8501/)",
+      "Bash(pip show *)"
     ]
   }
 }
