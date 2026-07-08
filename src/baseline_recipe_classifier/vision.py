@@ -77,7 +77,9 @@ _DEBUG_LOG = Path(__file__).parent.parent.parent / "vision_debug.txt"
 
 
 def _parse_json(raw: str) -> dict | None:
-    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
+    # llava:7b escapes underscores as \_ (markdown) which is invalid JSON
+    cleaned = raw.replace(r"\_", "_")
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned.strip(), flags=re.MULTILINE)
     cleaned = re.sub(r"```\s*$", "", cleaned, flags=re.MULTILINE).strip()
 
     # Strategy 1: direct parse
