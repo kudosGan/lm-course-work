@@ -10,7 +10,7 @@ dataset:
 adapter_path: "adapters/recipe_d_e"
 
 vision:
-  vision_model: "llava:7b"
+  vision_model: "gemma4:latest"
 
 categories:
   A:
